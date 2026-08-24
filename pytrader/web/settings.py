@@ -1,4 +1,7 @@
-from pydantic import BaseSettings
+try:
+    from pydantic_settings import BaseSettings
+except ImportError:  # pydantic v1 兼容
+    from pydantic import BaseSettings
 
 
 class APISettings(BaseSettings):
