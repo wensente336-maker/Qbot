@@ -2,7 +2,8 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { api, clearToken, getToken } from "@/lib/api";
+import { api, getToken } from "@/lib/api";
+import Nav from "@/components/Nav";
 
 const STATUSES = [
   "topic_confirmed",
@@ -73,51 +74,44 @@ export default function ProjectsPage() {
     }
   }
 
-  function logout() {
-    clearToken();
-    router.push("/");
-  }
-
   return (
-    <div className="container">
-      <div className="card">
-        <div className="topbar">
-          <h1 style={{ margin: 0 }}>内容项目</h1>
-          <div>
+    <>
+      <Nav />
+      <div className="container wide">
+        <div className="card">
+          <div className="topbar">
+            <h1 style={{ margin: 0 }}>内容项目</h1>
             <button className="secondary" onClick={createProject}>
               新建项目
-            </button>{" "}
-            <button className="secondary" onClick={logout}>
-              退出
             </button>
           </div>
+
+          {loading && <p className="muted">加载中…</p>}
+          {error && <div className="error">{error}</div>}
+
+          <ul className="list">
+            {projects.map((p) => (
+              <li key={p.id}>
+                <div>
+                  <div>项目 #{p.id}</div>
+                  <div className="muted">{p.updated_at}</div>
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                  <span className="badge">{p.status}</span>
+                  {STATUSES.indexOf(p.status) < STATUSES.length - 1 && (
+                    <button className="secondary" onClick={() => advance(p)}>
+                      推进
+                    </button>
+                  )}
+                </div>
+              </li>
+            ))}
+            {!loading && projects.length === 0 && (
+              <li className="muted">暂无项目，点击「新建项目」开始</li>
+            )}
+          </ul>
         </div>
-
-        {loading && <p className="muted">加载中…</p>}
-        {error && <div className="error">{error}</div>}
-
-        <ul className="list">
-          {projects.map((p) => (
-            <li key={p.id}>
-              <div>
-                <div>项目 #{p.id}</div>
-                <div className="muted">{p.updated_at}</div>
-              </div>
-              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                <span className="badge">{p.status}</span>
-                {STATUSES.indexOf(p.status) < STATUSES.length - 1 && (
-                  <button className="secondary" onClick={() => advance(p)}>
-                    推进
-                  </button>
-                )}
-              </div>
-            </li>
-          ))}
-          {!loading && projects.length === 0 && (
-            <li className="muted">暂无项目，点击「新建项目」开始</li>
-          )}
-        </ul>
       </div>
-    </div>
+    </>
   );
 }
