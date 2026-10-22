@@ -1,0 +1,82 @@
+# 自媒体 AI 工作台 - 开发环境编排（S0 工程基座）
+# 用法：cd infra && docker compose up -d
+# 说明：renderer（Remotion 渲染）在 S3 作为独立容器接入，S0 不涉及视频渲染。
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: zmt-postgres
+    environment:
+      POSTGRES_USER: zmt
+      POSTGRES_PASSWORD: zmt
+      POSTGRES_DB: zmt
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U zmt -d zmt"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: zmt-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: ../apps/api
+    container_name: zmt-api
+    environment:
+      DATABASE_URL: postgresql+asyncpg://zmt:zmt@postgres:5432/zmt
+      REDIS_URL: redis://redis:6379/0
+      SECRET_KEY: dev-only-change-me
+      ACCESS_TOKEN_EXPIRE_MINUTES: 1440
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    command:
+      - sh
+      - -c
+      - "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+
+  worker:
+    build:
+      context: ../apps/api
+    container_name: zmt-worker
+    environment:
+      DATABASE_URL: postgresql+asyncpg://zmt:zmt@postgres:5432/zmt
+      REDIS_URL: redis://redis:6379/0
+      SECRET_KEY: dev-only-change-me
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: ["celery", "-A", "app.tasks.celery_app:celery", "worker", "--loglevel=info"]
+
+  web:
+    build:
+      context: ../apps/web
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:8000
+    container_name: zmt-web
+    depends_on:
+      - api
+    ports:
+      - "3000:3000"
+
+volumes:
+  pgdata:

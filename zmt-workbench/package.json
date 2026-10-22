@@ -1,0 +1,20 @@
+{
+  "name": "zmt-workbench",
+  "version": "0.1.0",
+  "private": true,
+  "description": "自媒体 AI 工作台 monorepo（web / api / renderer / packages）",
+  "workspaces": [
+    "apps/web",
+    "apps/renderer",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:web": "npm --workspace @zmt/web run dev",
+    "build:web": "npm --workspace @zmt/web run build",
+    "build:renderer": "npm --workspace @zmt/renderer run build",
+    "lint": "npm --workspaces --if-present run lint"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
