@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { api, setToken } from "@/lib/api";
 
@@ -57,6 +58,9 @@ export default function LoginPage() {
             {loading ? "登录中…" : "登录"}
           </button>
         </form>
+        <p className="muted" style={{ marginTop: 12 }}>
+          还没有账号？<Link href="/register">去注册</Link>
+        </p>
       </div>
     </div>
   );

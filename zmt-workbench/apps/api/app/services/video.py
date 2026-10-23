@@ -4,7 +4,10 @@
 环境下由 API 同步调用执行；接入队列后可将同一函数包装为 Celery 任务（见 tasks/）。
 """
 
+import os
+
 from fastapi import HTTPException, status
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.asr import asr
@@ -14,9 +17,17 @@ from app.core.qa import (
     build_silence_detect_cmd,
     summarize_qa,
 )
+from app.core.render import (
+    FFMPEG,
+    estimated_duration_ms,
+    render_to_file,
+)
+from app.core.storage import storage
 from app.core.timeline import build_remap, merge_cuts
 from app.models.project import ContentProject
-from app.models.video import VideoJob
+from app.models.system import AssetFile
+from app.models.video import VideoAsset, VideoJob
+from app.services.billing import record_llm_usage
 
 
 async def _get_owned_project(db: AsyncSession, project_id: int, user_id: int) -> ContentProject:
@@ -89,7 +100,41 @@ async def generate_storyboard(
             "你是分镜导演，输出 JSON 数组，每项含 {index,start_ms,end_ms,visual,subtitle,visual_skill}。",
             f"项目 #{project_id}，脚本 ID={script_id}",
         )
+        await record_llm_usage(db, project_id=project_id)
     return await _finish(db, job, {"segments": segments})
+
+
+def _resolve_local_path(asset_ref: str) -> str:
+    """把 asset_ref 解析为本地绝对路径；远程 URL 暂不支持本地渲染。"""
+    if asset_ref.startswith(("http://", "https://")):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "渲染暂不支持远程 URL，请先本地上传")
+    return asset_ref if os.path.isabs(asset_ref) else storage.local_path(asset_ref)
+
+
+async def _latest_job(db: AsyncSession, project_id: int, job_type: str) -> VideoJob | None:
+    return await db.scalar(
+        select(VideoJob)
+        .where(VideoJob.project_id == project_id, VideoJob.job_type == job_type)
+        .order_by(VideoJob.id.desc())
+    )
+
+
+async def _resolve_render_inputs(
+    db: AsyncSession, project_id: int
+) -> tuple[str | None, list[dict]]:
+    """解析渲染输入：素材源本地路径 + 最新分镜字幕句。"""
+    source_path: str | None = None
+    source_job = await _latest_job(db, project_id, "transcribe")
+    if source_job and (source_job.request or {}).get("asset_ref"):
+        candidate = _resolve_local_path(source_job.request["asset_ref"])
+        if os.path.isfile(candidate):
+            source_path = candidate
+
+    segments: list[dict] = []
+    story_job = await _latest_job(db, project_id, "editing")
+    if story_job and isinstance((story_job.result or {}).get("segments"), list):
+        segments = story_job.result["segments"]
+    return source_path, segments
 
 
 async def render_video(
@@ -102,14 +147,44 @@ async def render_video(
         "render",
         {"composition": composition, "resolution": resolution, "fps": fps},
     )
-    # 真实渲染由 Remotion/FFmpeg 在 render 队列执行；此处输出占位引用
+
+    source_path, segments = await _resolve_render_inputs(db, project_id)
+    output_key = storage.build_key("render-output", project_id, f"final-{job.id}.mp4")
+    output_path = storage.local_path(output_key)
+
+    if FFMPEG is None:
+        return await _finish(
+            db, job, {
+                "output_key": output_key,
+                "duration_ms": estimated_duration_ms(segments),
+                "status": "placeholder",
+            }
+        )
+
+    duration_ms = await render_to_file(source_path, output_path, resolution, fps, segments)
+
+    asset = AssetFile(
+        bucket="local",
+        key=output_key,
+        url=f"/media/{output_key}",
+        size_bytes=os.path.getsize(output_path),
+        content_type="video/mp4",
+        lifecycle="render-output",
+        status="uploaded",
+    )
+    db.add(asset)
+    await db.flush()
+    db.add(VideoAsset(project_id=project_id, kind="final", asset_file_id=asset.id))
+
     return await _finish(
         db,
         job,
         {
-            "output_key": f"render-output/{project_id}/final-{job.id}.mp4",
-            "duration_ms": 30000,
-            "status": "placeholder",
+            "output_key": output_key,
+            "url": f"/media/{output_key}",
+            "duration_ms": duration_ms,
+            "status": "rendered",
+            "segments": len(segments),
         },
     )
 

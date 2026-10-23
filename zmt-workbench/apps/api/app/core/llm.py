@@ -16,6 +16,7 @@ class LLMClient:
         self.base_url = settings.llm_base_url.rstrip("/")
         self.api_key = settings.llm_api_key
         self.model = settings.llm_model
+        self.last_usage: dict | None = None  # 最近一次调用的 token 用量
 
     @property
     def mock_enabled(self) -> bool:
@@ -43,7 +44,9 @@ class LLMClient:
                 headers={"Authorization": f"Bearer {self.api_key}"},
             )
             resp.raise_for_status()
-            return resp.json()["choices"][0]["message"]["content"]
+            data = resp.json()
+            self.last_usage = data.get("usage") or None  # 供成本记账读取
+            return data["choices"][0]["message"]["content"]
 
     async def json(self, system: str, user: str) -> dict:
         """调用并解析为 JSON 对象。"""

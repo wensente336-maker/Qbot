@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.llm import llm
 from app.models.project import ContentProject
 from app.models.script import Outline, Script, ScriptVersion
+from app.services.billing import record_llm_usage
 
 LENGTH_OPTIONS = (300, 500, 800)
 
@@ -50,6 +51,7 @@ async def generate_outline(db: AsyncSession, project_id: int, user_id: int) -> O
             "你是短视频大纲专家，输出 JSON 对象 {title, sections:[{name, point}]}。",
             f"项目 #{project_id}，为其生成口播大纲。",
         )
+        await record_llm_usage(db, project_id=project_id)
 
     outline = Outline(project_id=project_id, version=version, content=content, status="draft")
     db.add(outline)
@@ -102,6 +104,7 @@ async def generate_script(
             f"项目 #{project_id}，写作技巧={skill}，情绪强度={intensity}/5。",
         )
         content = data.get("content", "")
+        await record_llm_usage(db, project_id=project_id)
 
     script = await db.scalar(select(Script).where(Script.project_id == project_id))
     if script is None:
@@ -150,6 +153,7 @@ async def rewrite_segment(
             f"原段落：{segment}\n改写指令：{instruction}",
         )
         new_segment = data.get("content", segment)
+        await record_llm_usage(db, project_id=script.project_id)
 
     if script.content is None:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "文案为空，无法局部重写")

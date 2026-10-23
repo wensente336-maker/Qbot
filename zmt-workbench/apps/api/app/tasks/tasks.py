@@ -6,6 +6,7 @@
 """
 
 import asyncio
+import os
 from datetime import UTC, datetime
 
 from celery.utils.log import get_task_logger
@@ -15,6 +16,7 @@ from app.core.asr import asr
 from app.db.session import AsyncSessionLocal
 from app.models.system import TaskRun
 from app.models.video import VideoJob
+from app.services.billing import record_llm_usage
 from app.tasks.celery_app import celery
 
 logger = get_task_logger(__name__)
@@ -77,13 +79,10 @@ def monitor() -> dict:
 
 
 async def _monitor() -> dict:
-    from app.core.datasource import douyin_source
+    from app.services.benchmark import sync_benchmark
 
-    if not douyin_source.enabled:
-        logger.warning("抖音数据源未授权，monitor 任务跳过")
-        return {"scanned": 0, "reason": "douyin_not_authorized"}
-    # TODO(补充 API)：接入抖音后遍历 benchmark_accounts 并增量入库 source_works
-    return {"scanned": 0, "reason": "not_implemented"}
+    async with AsyncSessionLocal() as db:
+        return await sync_benchmark(db)
 
 
 @celery.task(name="app.tasks.transcribe")
@@ -142,6 +141,7 @@ async def _analyze(job_id: int) -> dict:
                 result = await llm.json_list(
                     "你是分镜导演，输出 JSON 数组。", f"项目任务 {job.project_id}，参数 {request}"
                 )
+                await record_llm_usage(db, project_id=job.project_id, job_id=job.id)
                 result = {"segments": result}
             job.result = result
             job.status = "succeeded"
@@ -160,6 +160,12 @@ def render(job_id: int) -> dict:
 
 
 async def _render(job_id: int) -> dict:
+    from app.core.render import FFMPEG, render_to_file
+    from app.core.storage import storage
+    from app.models.system import AssetFile
+    from app.models.video import VideoAsset
+    from app.services.video import _resolve_render_inputs
+
     target, key = str(job_id), "video_job"
     if not await _claim("render", target, key):
         return {"skipped": True}
@@ -171,12 +177,42 @@ async def _render(job_id: int) -> dict:
             job.status = "running"
             job.progress = 30
             await db.commit()
-            # TODO(补充 API)：调用 Remotion/FFmpeg 渲染子进程；此处为占位输出
-            result = {
-                "output_key": f"render-output/{job.project_id}/final-{job.id}.mp4",
-                "duration_ms": 30000,
-                "status": "placeholder",
-            }
+
+            request = job.request or {}
+            resolution = request.get("resolution", "1080x1920")
+            fps = int(request.get("fps", 30))
+            source_path, segments = await _resolve_render_inputs(db, job.project_id)
+            output_key = storage.build_key("render-output", job.project_id, f"final-{job.id}.mp4")
+            output_path = storage.local_path(output_key)
+
+            if FFMPEG is None:
+                result = {
+                    "output_key": output_key,
+                    "duration_ms": 30000,
+                    "status": "placeholder",
+                }
+            else:
+                duration_ms = await render_to_file(source_path, output_path, resolution, fps, segments)
+                asset = AssetFile(
+                    bucket="local",
+                    key=output_key,
+                    url=f"/media/{output_key}",
+                    size_bytes=os.path.getsize(output_path),
+                    content_type="video/mp4",
+                    lifecycle="render-output",
+                    status="uploaded",
+                )
+                db.add(asset)
+                await db.flush()
+                db.add(VideoAsset(project_id=job.project_id, kind="final", asset_file_id=asset.id))
+                result = {
+                    "output_key": output_key,
+                    "url": f"/media/{output_key}",
+                    "duration_ms": duration_ms,
+                    "status": "rendered",
+                    "segments": len(segments),
+                }
+
             job.result = result
             job.status = "succeeded"
             job.progress = 100

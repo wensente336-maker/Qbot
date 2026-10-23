@@ -6,6 +6,8 @@
 - render-output/  永久
 """
 
+import os
+
 from app.core.config import settings
 
 PREFIXES = ("benchmark", "user-uploads", "render-output")
@@ -37,6 +39,11 @@ class Storage:
         if lifecycle not in PREFIXES:
             raise ValueError(f"非法生命周期前缀：{lifecycle}")
         return f"{lifecycle}/{project_id}/{filename}"
+
+    @staticmethod
+    def local_path(key: str) -> str:
+        """把存储 key 映射为本地磁盘绝对路径（无 COS 时使用）。"""
+        return os.path.abspath(os.path.join(settings.local_media_dir, key))
 
 
 storage = Storage()

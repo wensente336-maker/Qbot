@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { api } from "@/lib/api";
+import { api, upload } from "@/lib/api";
 import Nav from "@/components/Nav";
 
 interface Project {
@@ -25,6 +25,7 @@ export default function VideosPage() {
   const [assetRef, setAssetRef] = useState("");
   const [cuts, setCuts] = useState("[[1200, 3600]]");
   const [error, setError] = useState("");
+  const [uploading, setUploading] = useState(false);
 
   const loadProjects = useCallback(async () => {
     try {
@@ -49,6 +50,26 @@ export default function VideosPage() {
   function selectProject(p: Project) {
     setActive(p.id);
     loadJobs(p.id);
+  }
+
+  async function onUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file || active === null) return;
+    setUploading(true);
+    setError("");
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      form.append("lifecycle", "user-uploads");
+      form.append("project_id", String(active));
+      const asset = await upload<{ key: string }>("/uploads", form);
+      setAssetRef(asset.key);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setUploading(false);
+      e.target.value = "";
+    }
   }
 
   async function run(path: string, body: Record<string, unknown>) {
@@ -91,6 +112,33 @@ export default function VideosPage() {
           {active !== null && (
             <div>
               <h3 style={{ marginTop: 16 }}>操作</h3>
+              <div className="row">
+                <input
+                  id="video-file"
+                  type="file"
+                  accept="video/*"
+                  style={{ display: "none" }}
+                  onChange={onUpload}
+                  disabled={uploading}
+                />
+                <label
+                  htmlFor="video-file"
+                  style={{
+                    marginTop: 0,
+                    padding: "10px 18px",
+                    background: "#232c3b",
+                    color: "#e8edf4",
+                    borderRadius: 8,
+                    fontWeight: 600,
+                    cursor: uploading ? "not-allowed" : "pointer",
+                    display: "inline-block",
+                    opacity: uploading ? 0.5 : 1,
+                  }}
+                >
+                  {uploading ? "上传中…" : "上传视频"}
+                </label>
+                <span className="muted">上传后自动填入媒体引用</span>
+              </div>
               <div className="row">
                 <input
                   placeholder="媒体引用（key/URL）"

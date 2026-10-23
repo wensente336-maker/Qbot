@@ -7,6 +7,7 @@ from app.core.llm import llm
 from app.models.benchmark import SourceWork
 from app.models.topic import Topic
 from app.schemas.topic import TopicGenerateRequest
+from app.services.billing import record_llm_usage
 
 
 def _mock_angles(count: int, base: str) -> list[dict]:
@@ -53,6 +54,7 @@ async def generate_topics(
         )
         user = f"入口：{payload.entry}\n主题：{base}\n需求数量：{payload.count}"
         angles = await llm.json_list(system, user)
+        await record_llm_usage(db)
         recommendation_base = None
 
     topics: list[Topic] = []
