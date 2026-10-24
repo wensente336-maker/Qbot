@@ -1,0 +1,108 @@
+# 自媒体 AI 工作台 - 运行环境编排
+# 用法：cd infra && cp ../apps/api/.env.example ../apps/api/.env（填好再启动） && docker compose up -d --build
+#
+# 关键约定：
+# 1. 所有后端服务共用 ../apps/api/.env（missing 时不阻塞启动，缺省走本地兜底）
+# 2. media 命名卷挂载到每个容器的 /data/media，保证转写产物在渲染时可见
+# 3. Remotion 模板渲染默认关闭（REMOTION_ENABLED=false）；开启需 render 容器内具备 node + Chromium
+
+x-api-base: &api-base
+  build:
+    context: ../apps/api
+  env_file:
+    - path: ../apps/api/.env
+      required: false
+  environment:
+    DATABASE_URL: postgresql+asyncpg://zmt:zmt@postgres:5432/zmt
+    REDIS_URL: redis://redis:6379/0
+    SECRET_KEY: ${SECRET_KEY:-dev-only-change-me}
+    ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-1440}
+    LOCAL_MEDIA_DIR: /data/media
+  volumes:
+    - media:/data/media
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: zmt-postgres
+    environment:
+      POSTGRES_USER: zmt
+      POSTGRES_PASSWORD: zmt
+      POSTGRES_DB: zmt
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U zmt -d zmt"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: zmt-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    <<: *api-base
+    container_name: zmt-api
+    ports:
+      - "8000:8000"
+    command:
+      - sh
+      - -c
+      - "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+
+  worker-monitor:
+    <<: *api-base
+    container_name: zmt-worker-monitor
+    command: ["celery", "-A", "app.tasks.celery_app:celery", "worker", "-Q", "monitor", "--concurrency=1", "--loglevel=info"]
+
+  worker-transcribe:
+    <<: *api-base
+    container_name: zmt-worker-transcribe
+    command: ["celery", "-A", "app.tasks.celery_app:celery", "worker", "-Q", "transcribe", "--concurrency=2", "--loglevel=info"]
+
+  worker-analyze:
+    <<: *api-base
+    container_name: zmt-worker-analyze
+    command: ["celery", "-A", "app.tasks.celery_app:celery", "worker", "-Q", "analyze", "--concurrency=4", "--loglevel=info"]
+
+  worker-render:
+    <<: *api-base
+    container_name: zmt-worker-render
+    command: ["celery", "-A", "app.tasks.celery_app:celery", "worker", "-Q", "render", "--concurrency=1", "--loglevel=info"]
+
+  beat:
+    <<: *api-base
+    container_name: zmt-beat
+    command: ["celery", "-A", "app.tasks.celery_app:celery", "beat", "--loglevel=info"]
+
+  web:
+    build:
+      context: ../apps/web
+      args:
+        # 浏览器侧 API 地址；留空则走同源 /api/v1（由 next rewrites 转到 BACKEND_URL）
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-}
+        BACKEND_URL: ${BACKEND_URL:-http://api:8000}
+    container_name: zmt-web
+    depends_on:
+      - api
+    ports:
+      - "3000:3000"
+
+volumes:
+  pgdata:
+  media:
