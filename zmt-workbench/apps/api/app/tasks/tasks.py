@@ -6,7 +6,6 @@
 """
 
 import asyncio
-import os
 from datetime import UTC, datetime
 
 from celery.utils.log import get_task_logger
@@ -160,11 +159,7 @@ def render(job_id: int) -> dict:
 
 
 async def _render(job_id: int) -> dict:
-    from app.core.render import FFMPEG, render_to_file
-    from app.core.storage import storage
-    from app.models.system import AssetFile
-    from app.models.video import VideoAsset
-    from app.services.video import _resolve_render_inputs
+    from app.services.video import _resolve_render_inputs, render_to_asset
 
     target, key = str(job_id), "video_job"
     if not await _claim("render", target, key):
@@ -178,40 +173,8 @@ async def _render(job_id: int) -> dict:
             job.progress = 30
             await db.commit()
 
-            request = job.request or {}
-            resolution = request.get("resolution", "1080x1920")
-            fps = int(request.get("fps", 30))
             source_path, segments = await _resolve_render_inputs(db, job.project_id)
-            output_key = storage.build_key("render-output", job.project_id, f"final-{job.id}.mp4")
-            output_path = storage.local_path(output_key)
-
-            if FFMPEG is None:
-                result = {
-                    "output_key": output_key,
-                    "duration_ms": 30000,
-                    "status": "placeholder",
-                }
-            else:
-                duration_ms = await render_to_file(source_path, output_path, resolution, fps, segments)
-                asset = AssetFile(
-                    bucket="local",
-                    key=output_key,
-                    url=f"/media/{output_key}",
-                    size_bytes=os.path.getsize(output_path),
-                    content_type="video/mp4",
-                    lifecycle="render-output",
-                    status="uploaded",
-                )
-                db.add(asset)
-                await db.flush()
-                db.add(VideoAsset(project_id=job.project_id, kind="final", asset_file_id=asset.id))
-                result = {
-                    "output_key": output_key,
-                    "url": f"/media/{output_key}",
-                    "duration_ms": duration_ms,
-                    "status": "rendered",
-                    "segments": len(segments),
-                }
+            result = await render_to_asset(db, job, job.project_id, source_path, segments)
 
             job.result = result
             job.status = "succeeded"

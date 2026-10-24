@@ -19,6 +19,7 @@ for _key in (
     "DOUYIN_ACCESS_TOKEN",
 ):
     os.environ[_key] = ""
+os.environ["REMOTION_ENABLED"] = "false"
 
 from collections.abc import AsyncIterator
 

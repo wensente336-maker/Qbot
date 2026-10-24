@@ -1,6 +1,30 @@
-# 自媒体 AI 工作台 - 开发环境编排（S0 工程基座）
-# 用法：cd infra && docker compose up -d
-# 说明：renderer（Remotion 渲染）在 S3 作为独立容器接入，S0 不涉及视频渲染。
+# 自媒体 AI 工作台 - 运行环境编排
+# 用法：cd infra && cp ../apps/api/.env.example ../apps/api/.env（填好再启动） && docker compose up -d --build
+#
+# 关键约定：
+# 1. 所有后端服务共用 ../apps/api/.env（missing 时不阻塞启动，缺省走本地兜底）
+# 2. media 命名卷挂载到每个容器的 /data/media，保证转写产物在渲染时可见
+# 3. Remotion 模板渲染默认关闭（REMOTION_ENABLED=false）；开启需 render 容器内具备 node + Chromium
+
+x-api-base: &api-base
+  build:
+    context: ../apps/api
+  env_file:
+    - path: ../apps/api/.env
+      required: false
+  environment:
+    DATABASE_URL: postgresql+asyncpg://zmt:zmt@postgres:5432/zmt
+    REDIS_URL: redis://redis:6379/0
+    SECRET_KEY: ${SECRET_KEY:-dev-only-change-me}
+    ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-1440}
+    LOCAL_MEDIA_DIR: /data/media
+  volumes:
+    - media:/data/media
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
 
 services:
   postgres:
@@ -32,19 +56,8 @@ services:
       retries: 10
 
   api:
-    build:
-      context: ../apps/api
+    <<: *api-base
     container_name: zmt-api
-    environment:
-      DATABASE_URL: postgresql+asyncpg://zmt:zmt@postgres:5432/zmt
-      REDIS_URL: redis://redis:6379/0
-      SECRET_KEY: dev-only-change-me
-      ACCESS_TOKEN_EXPIRE_MINUTES: 1440
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
     ports:
       - "8000:8000"
     command:
@@ -53,83 +66,37 @@ services:
       - "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
 
   worker-monitor:
-    build:
-      context: ../apps/api
+    <<: *api-base
     container_name: zmt-worker-monitor
-    environment:
-      DATABASE_URL: postgresql+asyncpg://zmt:zmt@postgres:5432/zmt
-      REDIS_URL: redis://redis:6379/0
-      SECRET_KEY: dev-only-change-me
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
     command: ["celery", "-A", "app.tasks.celery_app:celery", "worker", "-Q", "monitor", "--concurrency=1", "--loglevel=info"]
 
   worker-transcribe:
-    build:
-      context: ../apps/api
+    <<: *api-base
     container_name: zmt-worker-transcribe
-    environment:
-      DATABASE_URL: postgresql+asyncpg://zmt:zmt@postgres:5432/zmt
-      REDIS_URL: redis://redis:6379/0
-      SECRET_KEY: dev-only-change-me
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
     command: ["celery", "-A", "app.tasks.celery_app:celery", "worker", "-Q", "transcribe", "--concurrency=2", "--loglevel=info"]
 
   worker-analyze:
-    build:
-      context: ../apps/api
+    <<: *api-base
     container_name: zmt-worker-analyze
-    environment:
-      DATABASE_URL: postgresql+asyncpg://zmt:zmt@postgres:5432/zmt
-      REDIS_URL: redis://redis:6379/0
-      SECRET_KEY: dev-only-change-me
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
     command: ["celery", "-A", "app.tasks.celery_app:celery", "worker", "-Q", "analyze", "--concurrency=4", "--loglevel=info"]
 
   worker-render:
-    build:
-      context: ../apps/api
+    <<: *api-base
     container_name: zmt-worker-render
-    environment:
-      DATABASE_URL: postgresql+asyncpg://zmt:zmt@postgres:5432/zmt
-      REDIS_URL: redis://redis:6379/0
-      SECRET_KEY: dev-only-change-me
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
     command: ["celery", "-A", "app.tasks.celery_app:celery", "worker", "-Q", "render", "--concurrency=1", "--loglevel=info"]
 
   beat:
-    build:
-      context: ../apps/api
+    <<: *api-base
     container_name: zmt-beat
-    environment:
-      DATABASE_URL: postgresql+asyncpg://zmt:zmt@postgres:5432/zmt
-      REDIS_URL: redis://redis:6379/0
-      SECRET_KEY: dev-only-change-me
-    depends_on:
-      redis:
-        condition: service_healthy
     command: ["celery", "-A", "app.tasks.celery_app:celery", "beat", "--loglevel=info"]
 
   web:
     build:
       context: ../apps/web
       args:
-        NEXT_PUBLIC_API_URL: http://localhost:8000
+        # 浏览器侧 API 地址；留空则走同源 /api/v1（由 next rewrites 转到 BACKEND_URL）
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-}
+        BACKEND_URL: ${BACKEND_URL:-http://api:8000}
     container_name: zmt-web
     depends_on:
       - api
@@ -138,3 +105,4 @@ services:
 
 volumes:
   pgdata:
+  media:

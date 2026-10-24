@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.asr import asr
 from app.core.llm import llm
 from app.core.qa import run_qa_checks
+from app.core.remotion import mux_audio, render_composition
 from app.core.render import (
     FFMPEG,
     estimated_duration_ms,
@@ -135,31 +136,60 @@ async def _resolve_render_inputs(
     return source_path, segments
 
 
-async def render_video(
-    db: AsyncSession, user_id: int, project_id: int, composition: str, resolution: str, fps: int
-) -> VideoJob:
-    await _get_owned_project(db, project_id, user_id)
-    job = await _new_job(
-        db,
-        project_id,
-        "render",
-        {"composition": composition, "resolution": resolution, "fps": fps},
+async def _attach_voiceover(db: AsyncSession, project_id: int, video_path: str) -> bool:
+    """若项目已有口播音频，则混流进 Remotion 成片。"""
+    asset = await db.scalar(
+        select(VideoAsset)
+        .where(VideoAsset.project_id == project_id, VideoAsset.kind == "voiceover")
+        .order_by(VideoAsset.id.desc())
     )
+    if asset is None:
+        return False
+    audio = await db.get(AssetFile, asset.asset_file_id)
+    if audio is None:
+        return False
+    audio_path = storage.local_path(audio.key)
+    if not os.path.isfile(audio_path) or not os.path.isfile(video_path):
+        return False
+    return await mux_audio(video_path, audio_path)
 
-    source_path, segments = await _resolve_render_inputs(db, project_id)
+
+async def render_to_asset(
+    db: AsyncSession,
+    job: VideoJob,
+    project_id: int,
+    source_path: str | None,
+    segments: list[dict],
+) -> dict:
+    """按 `request.composition` 出片：remotion 优先，失败/未启用回退 FFmpeg。
+
+    仅在真正产出文件时登记 AssetFile + VideoAsset；无 FFmpeg 时返回 placeholder。
+    """
+    request = job.request or {}
+    resolution = request.get("resolution", "1080x1920")
+    fps = int(request.get("fps", 30))
+    composition = request.get("composition", "default")
+
     output_key = storage.build_key("render-output", project_id, f"final-{job.id}.mp4")
     output_path = storage.local_path(output_key)
 
-    if FFMPEG is None:
-        return await _finish(
-            db, job, {
+    engine = "ffmpeg"
+    duration_ms: int | None = None
+
+    if composition == "remotion":
+        duration_ms = await render_composition(segments, output_path, resolution, fps)
+        if duration_ms is not None:
+            engine = "remotion"
+            await _attach_voiceover(db, project_id, output_path)
+
+    if duration_ms is None:
+        if FFMPEG is None:
+            return {
                 "output_key": output_key,
                 "duration_ms": estimated_duration_ms(segments),
                 "status": "placeholder",
             }
-        )
-
-    duration_ms = await render_to_file(source_path, output_path, resolution, fps, segments)
+        duration_ms = await render_to_file(source_path, output_path, resolution, fps, segments)
 
     asset = AssetFile(
         bucket="local",
@@ -174,17 +204,30 @@ async def render_video(
     await db.flush()
     db.add(VideoAsset(project_id=project_id, kind="final", asset_file_id=asset.id))
 
-    return await _finish(
+    return {
+        "output_key": output_key,
+        "url": f"/media/{output_key}",
+        "duration_ms": duration_ms,
+        "status": "rendered",
+        "engine": engine,
+        "segments": len(segments),
+    }
+
+
+async def render_video(
+    db: AsyncSession, user_id: int, project_id: int, composition: str, resolution: str, fps: int
+) -> VideoJob:
+    await _get_owned_project(db, project_id, user_id)
+    job = await _new_job(
         db,
-        job,
-        {
-            "output_key": output_key,
-            "url": f"/media/{output_key}",
-            "duration_ms": duration_ms,
-            "status": "rendered",
-            "segments": len(segments),
-        },
+        project_id,
+        "render",
+        {"composition": composition, "resolution": resolution, "fps": fps},
     )
+
+    source_path, segments = await _resolve_render_inputs(db, project_id)
+    result = await render_to_asset(db, job, project_id, source_path, segments)
+    return await _finish(db, job, result)
 
 
 async def run_qa(db: AsyncSession, user_id: int, job_id: int) -> VideoJob:

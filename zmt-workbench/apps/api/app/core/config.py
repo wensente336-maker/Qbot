@@ -55,6 +55,14 @@ class Settings(BaseSettings):
     tencent_tts_volume: float = 0.0
     tencent_tts_sample_rate: int = 16000
 
+    # Remotion 模板渲染（可选）：需 renderer 依赖 + Chromium，未启用时全部走 FFmpeg
+    remotion_enabled: bool = False
+    remotion_dir: str = "apps/renderer"
+    remotion_entry: str = "src/index.ts"
+    remotion_composition: str = "VideoTemplate"
+    remotion_timeout_seconds: int = 900
+    remotion_browser_executable: str = ""
+
     # 腾讯云 COS（留空则由 local_media_dir 本地磁盘兜底）
     cos_secret_id: str = ""
     cos_secret_key: str = ""

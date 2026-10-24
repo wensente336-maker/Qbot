@@ -1,11 +1,17 @@
 import { AbsoluteFill, Composition, Series } from "remotion";
+import type { CalculateMetadataFunction } from "remotion";
 import { SceneFrame } from "@zmt/visual";
 
-type Scene = {
+export type Scene = {
+  index?: number;
   visual: string;
   subtitle?: string;
   accent?: string;
+  /** 分镜时长（帧）。后端按 start_ms / end_ms 换算后写入 */
+  durationInFrames?: number;
 };
+
+type VideoProps = { scenes?: Scene[] };
 
 const DEFAULT_SCENES: Scene[] = [
   { visual: "开场钩子", subtitle: "3 秒内抓住注意力", accent: "#4da3ff" },
@@ -16,18 +22,29 @@ const DEFAULT_SCENES: Scene[] = [
 
 const FRAMES_PER_SCENE = 90;
 
-export const VideoTemplate: React.FC<{ scenes?: Scene[] }> = ({
+function sceneFrames(scene: Scene): number {
+  return Math.max(1, scene.durationInFrames ?? FRAMES_PER_SCENE);
+}
+
+function totalFrames(scenes: Scene[]): number {
+  return Math.max(
+    1,
+    scenes.reduce((sum, scene) => sum + sceneFrames(scene), 0),
+  );
+}
+
+export const VideoTemplate: React.FC<VideoProps> = ({
   scenes = DEFAULT_SCENES,
 }) => (
   <AbsoluteFill>
     <Series>
-      {scenes.map((s, i) => (
-        <Series.Sequence key={i} durationInFrames={FRAMES_PER_SCENE}>
+      {scenes.map((scene, i) => (
+        <Series.Sequence key={i} durationInFrames={sceneFrames(scene)}>
           <SceneFrame
-            index={i + 1}
-            visual={s.visual}
-            subtitle={s.subtitle}
-            accent={s.accent}
+            index={scene.index ?? i + 1}
+            visual={scene.visual}
+            subtitle={scene.subtitle}
+            accent={scene.accent || undefined}
           />
         </Series.Sequence>
       ))}
@@ -35,14 +52,21 @@ export const VideoTemplate: React.FC<{ scenes?: Scene[] }> = ({
   </AbsoluteFill>
 );
 
+const calculateVideoMetadata: CalculateMetadataFunction<VideoProps> = ({
+  props,
+}) => ({
+  durationInFrames: totalFrames(props.scenes ?? DEFAULT_SCENES),
+});
+
 export const RemotionRoot: React.FC = () => (
   <Composition
     id="VideoTemplate"
     component={VideoTemplate}
-    durationInFrames={DEFAULT_SCENES.length * FRAMES_PER_SCENE}
+    durationInFrames={totalFrames(DEFAULT_SCENES)}
     fps={30}
     width={1080}
     height={1920}
     defaultProps={{ scenes: DEFAULT_SCENES }}
+    calculateMetadata={calculateVideoMetadata}
   />
 );
