@@ -66,6 +66,21 @@ def build_synthetic_cmd(output_path: str, resolution: str, fps: int, duration_ms
     ]
 
 
+def subtitle_style(resolution: str = "1080x1920") -> str:
+    """字幕样式：字号取屏高 4.5%，边距对齐 8% 左右 / 15% 底部的安全区。
+
+    与 `app.core.qa.check_subtitle_bounds` 使用同一套参数，保证「检测 = 实际烧录」。
+    """
+    w, h = parse_resolution(resolution)
+    font_size = max(16, round(h * 0.045))
+    margin_v = round(h * 0.15)
+    margin_h = round(w * 0.08)
+    return (
+        f"FontSize={font_size},Alignment=2,"
+        f"MarginV={margin_v},MarginL={margin_h},MarginR={margin_h},Outline=2"
+    )
+
+
 def build_render_cmd(
     input_path: str,
     output_path: str,
@@ -80,7 +95,7 @@ def build_render_cmd(
         f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,fps={fps}"
     )
     if srt_path:
-        vf += f",subtitles={srt_path}"
+        vf += f",subtitles={srt_path}:force_style='{subtitle_style(resolution)}'"
     return [
         FFMPEG, "-y", "-i", input_path,
         "-vf", vf,

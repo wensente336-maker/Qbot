@@ -138,4 +138,7 @@ async def test_video_pipeline(client: AsyncClient, auth_headers: dict[str, str])
 
     r = await client.post(f"/api/v1/videos/jobs/{job_id}/qa", headers=auth_headers)
     assert r.status_code == 200, r.text
-    assert r.json()["result"]["qa"]["passed"] is True
+    qa = r.json()["result"]["qa"]
+    # 4 项真实检测均已执行（合成片为静音+黑底，故只校验结构与检测明细，不假设全通过）
+    assert set(qa["checks"]) == {"silence", "black", "subtitle", "av_sync"}
+    assert "details" in qa

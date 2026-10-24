@@ -4,6 +4,21 @@ import os
 
 # 必须在 import 任何 app 模块之前覆盖，避免触发默认的 asyncpg 引擎创建
 os.environ["DATABASE_URL"] = "sqlite+aiosqlite://"
+# 测试必须离线且确定性：清空外部服务凭据，统一走 mock/本地兜底
+for _key in (
+    "LLM_API_KEY",
+    "ASR_ENDPOINT",
+    "ASR_OPENAI_BASE_URL",
+    "ASR_OPENAI_MODEL",
+    "TTS_ENDPOINT",
+    "TTS_EDGE_VOICE",
+    "TENCENT_SECRET_ID",
+    "TENCENT_SECRET_KEY",
+    "COS_SECRET_ID",
+    "COS_SECRET_KEY",
+    "DOUYIN_ACCESS_TOKEN",
+):
+    os.environ[_key] = ""
 
 from collections.abc import AsyncIterator
 

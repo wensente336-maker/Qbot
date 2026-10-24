@@ -12,11 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.asr import asr
 from app.core.llm import llm
-from app.core.qa import (
-    build_black_detect_cmd,
-    build_silence_detect_cmd,
-    summarize_qa,
-)
+from app.core.qa import run_qa_checks
 from app.core.render import (
     FFMPEG,
     estimated_duration_ms,
@@ -197,13 +193,23 @@ async def run_qa(db: AsyncSession, user_id: int, job_id: int) -> VideoJob:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "任务不存在")
     await _get_owned_project(db, job.project_id, user_id)
 
-    # FFmpeg 命令模板（真实执行在 render 队列）；此处模拟 4 项全通过
-    details = {
-        "silence_cmd": build_silence_detect_cmd("{{input}}"),
-        "black_cmd": build_black_detect_cmd("{{input}}"),
-    }
-    summary = summarize_qa(details=details)
-    job.result = {"qa": summary}
+    if job.job_type != "render":
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "仅渲染任务可执行质检")
+
+    output_key = (job.result or {}).get("output_key")
+    if not output_key:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "该任务没有成片产物，请先完成渲染")
+
+    output_path = storage.local_path(output_key)
+    if not os.path.isfile(output_path):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "成片文件不存在，请重新渲染")
+
+    story_job = await _latest_job(db, job.project_id, "editing")
+    segments = (story_job.result or {}).get("segments", []) if story_job else []
+    resolution = (job.request or {}).get("resolution", "1080x1920")
+
+    summary = await run_qa_checks(output_path, segments=segments, resolution=resolution)
+    job.result = {**(job.result or {}), "qa": summary}
     job.progress = 100
     await db.commit()
     await db.refresh(job)

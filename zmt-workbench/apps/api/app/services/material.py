@@ -1,5 +1,8 @@
 """素材服务：录入素材 + AI 特征提取（版本化）。"""
 
+import json
+import re
+
 from fastapi import HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -8,6 +11,51 @@ from app.core.config import settings
 from app.core.llm import llm
 from app.models.benchmark import Creator, MaterialFeature, SourceWork
 from app.schemas.material import SourceWorkCreate
+from app.services.billing import record_llm_usage
+
+_FEATURE_SEPARATORS = re.compile(r"[,，、;；/\n|]+")
+
+
+def _normalize_features(value: object) -> list[str] | None:
+    """把 LLM 返回的 features 统一成 list[str]。
+
+    DeepSeek 在 JSON 模式下仍可能返回字符串（「标签A、标签B」）或对象数组，
+    直接入库会与 `MaterialFeatureRead.features: list` 冲突，因此在此收敛。
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        items = [part.strip() for part in _FEATURE_SEPARATORS.split(value)]
+        return [item for item in items if item] or None
+    if isinstance(value, (list, tuple, set)):
+        result: list[str] = []
+        for item in value:
+            if isinstance(item, str):
+                text = item.strip()
+            elif isinstance(item, dict):
+                text = str(
+                    item.get("label") or item.get("name") or item.get("tag") or ""
+                ).strip()
+            else:
+                text = str(item).strip()
+            if text and text not in result:
+                result.append(text)
+        return result or None
+    text = str(value).strip()
+    return [text] if text else None
+
+
+def _as_text(value: object) -> str | None:
+    """把可能为数组/对象的字段收敛为文本，避免写库类型错误。"""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value.strip() or None
+    if isinstance(value, (list, tuple)):
+        return "、".join(str(v).strip() for v in value if str(v).strip()) or None
+    if isinstance(value, dict):
+        return json.dumps(value, ensure_ascii=False)
+    return str(value).strip() or None
 
 
 async def _get_or_create_placeholder_creator(
@@ -76,18 +124,19 @@ async def extract_features(db: AsyncSession, work_id: int) -> MaterialFeature:
         system = "你是短视频素材分析专家，输出 JSON 字段：theme/audience/core_viewpoint/hook/structure/emotion/features。"
         user = f"素材标题：{work.title or ''}\n文案：{work.caption or ''}"
         data = await llm.json(system, user)
+        await record_llm_usage(db)
         model = settings.llm_model
 
     feat = MaterialFeature(
         work_id=work_id,
         version=version,
-        theme=data.get("theme"),
-        audience=data.get("audience"),
-        core_viewpoint=data.get("core_viewpoint"),
-        hook=data.get("hook"),
-        structure=data.get("structure"),
-        emotion=data.get("emotion"),
-        features=data.get("features"),
+        theme=_as_text(data.get("theme")),
+        audience=_as_text(data.get("audience")),
+        core_viewpoint=_as_text(data.get("core_viewpoint")),
+        hook=_as_text(data.get("hook")),
+        structure=_as_text(data.get("structure")),
+        emotion=_as_text(data.get("emotion")),
+        features=_normalize_features(data.get("features")),
         model=model,
     )
     db.add(feat)

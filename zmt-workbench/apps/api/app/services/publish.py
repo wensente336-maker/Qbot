@@ -6,10 +6,12 @@ from fastapi import HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.llm import llm
 from app.models.project import ContentProject
 from app.models.publish import MetricDimension, MetricSnapshot, Publication
 from app.models.system import CostEvent, DailyQuota
 from app.schemas.publish import CostEventCreate, MetricSyncRequest, PublicationCreate
+from app.services.billing import record_llm_usage
 
 DEFAULT_DIMENSIONS = [
     {
@@ -173,12 +175,62 @@ async def weekly_report(db: AsyncSession, user_id: int, project_id: int | None =
     rows = await db.execute(q.group_by(MetricDimension.key))
     metrics = {k: int(v) for k, v in rows.all()}
 
-    # 周报总结：无真实数据源时给出占位结论
     return {
         "period": "last_7_days",
         "metrics": metrics,
-        "summary": "占位周报：待接入抖音数据源与指标同步后，此处将输出增长趋势与选题复盘结论。",
+        "summary": await _weekly_summary(db, metrics, project_id),
     }
+
+
+def _fallback_weekly_summary(metrics: dict[str, int]) -> str:
+    """无 LLM 或调用失败时，用指标本身给出可读结论。"""
+    if not metrics:
+        return "近 7 天暂无指标数据：请先发布作品并同步播放与互动数据。"
+
+    views = metrics.get("views", 0)
+    likes = metrics.get("likes", 0)
+    comments = metrics.get("comments", 0)
+    shares = metrics.get("shares", 0)
+    followers = metrics.get("followers", 0)
+
+    parts = [
+        f"播放 {views}",
+        f"点赞 {likes}",
+        f"评论 {comments}",
+        f"转发 {shares}",
+        f"涨粉 {followers}",
+    ]
+    if views > 0:
+        engagement = (likes + comments + shares) / views * 100
+        verdict = (
+            "互动率健康，可复用当前选题与开场结构"
+            if engagement >= 5
+            else "互动率偏低，建议强化前 3 秒钩子与结尾互动引导"
+        )
+        return f"近 7 天累计{'、'.join(parts)}；互动率 {engagement:.1f}%，{verdict}。"
+    return f"近 7 天累计{'、'.join(parts)}；暂无播放数据，先确认作品是否已发布并同步指标。"
+
+
+async def _weekly_summary(
+    db: AsyncSession, metrics: dict[str, int], project_id: int | None
+) -> str:
+    if llm.mock_enabled:
+        return _fallback_weekly_summary(metrics)
+
+    system = (
+        "你是短视频数据分析师。基于近 7 天指标输出中文周报结论，"
+        "包含：表现概述、可能的增长或下滑原因、下周 2 条可执行建议。"
+        "只输出 JSON：{\"summary\": \"...\"}，150 字以内。"
+    )
+    user = f"项目：{project_id or '全部'}\n指标：{metrics}"
+    try:
+        data = await llm.json(system, user)
+        await record_llm_usage(db, project_id=project_id)
+    except Exception:  # noqa: BLE001 - 网络/解析失败时退回本地结论
+        return _fallback_weekly_summary(metrics)
+
+    summary = str(data.get("summary") or "").strip()
+    return summary or _fallback_weekly_summary(metrics)
 
 
 async def get_quota(db: AsyncSession, category: str) -> DailyQuota:
