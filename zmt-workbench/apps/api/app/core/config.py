@@ -26,12 +26,23 @@ class Settings(BaseSettings):
     llm_api_key: str = ""
     llm_model: str = "deepseek-chat"
 
-    # ASR（FunASR 本地服务；留空则按腾讯云云 API / 内置 mock 依次降级）
+    # ASR（自定义服务，约定 POST {audio} → {text,timestamp}；优先级最高）
     asr_endpoint: str = ""
 
-    # TTS 口播合成（留空则按腾讯云云 API / 禁用依次降级）
+    # ASR（OpenAI 兼容的 faster-whisper，如宿主机的 meeting-minutes-stt）
+    # 留空则不启用；enable 后走 httpx multipart 上传，response_format=verbose_json
+    asr_openai_base_url: str = ""
+    asr_openai_model: str = ""
+    asr_openai_api_key: str = ""
+
+    # TTS 口播合成（自定义服务，约定 POST {text} → {audio_url|key}；优先级最高）
     tts_endpoint: str = ""
     tts_voice: str = "default"
+
+    # TTS（edge-tts 微软 Edge 朗读引擎；voice 非空即启用，优先级高于腾讯云）
+    tts_edge_voice: str = ""
+    tts_edge_rate: str = "+0%"
+    tts_edge_volume: str = "+0%"
 
     # 腾讯云云 API（ASR 录音文件识别 + TTS 语音合成；两者均留空时降级为 mock/禁用）
     # 注：4C/3.6G 无 GPU 的 CVM 不足以自建 FunASR，生产走云 API

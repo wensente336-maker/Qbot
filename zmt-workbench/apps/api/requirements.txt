@@ -20,6 +20,9 @@ redis>=5.0,<6.0
 # 上传/表单
 python-multipart>=0.0.9,<1.0
 
+# TTS：edge-tts（微软 Edge 朗读引擎，零算力口播合成）
+edge-tts>=6.1,<7.0
+
 # 腾讯云云 API（录音文件识别 ASR / 语音合成 TTS）
 tencentcloud-sdk-python-common>=3.0.1000
 tencentcloud-sdk-python-asr>=3.0.1000

@@ -1,9 +1,9 @@
-"""TTS 口播合成客户端（三档优先级）。
+"""TTS 口播合成客户端（多档优先级）。
 
-1. `TTS_ENDPOINT`：自建服务，约定 `POST {text}` 返回 `{"audio_url"|"key": str}`。
-2. `TENCENT_SECRET_ID/KEY`：腾讯云「语音合成」云 API——按标点分块（单次字符有限），
-   逐块合成 mp3 后用 ffmpeg 拼接为一个音频文件，落本地存储并返回 key。
-3. 都未配置：返回 None，由调用方走「上传口播音频」的兜底路径。
+1. `TTS_ENDPOINT`：自定义服务，约定 `POST {text}` 返回 `{"audio_url"|"key": str}`。
+2. `TTS_EDGE_VOICE`：edge-tts 微软 Edge 朗读引擎（零算力，输出 mp3），voice 非空即启用。
+3. `TENCENT_SECRET_ID/KEY`：腾讯云「语音合成」云 API——按标点分块后 ffmpeg 拼接。
+4. 都未配置：返回 None，由调用方走「上传口播音频」的兜底路径。
 """
 
 import asyncio
@@ -29,8 +29,12 @@ class TTSClient:
         return bool(settings.tencent_secret_id and settings.tencent_secret_key)
 
     @property
+    def edge_enabled(self) -> bool:
+        return bool(settings.tts_edge_voice)
+
+    @property
     def enabled(self) -> bool:
-        return bool(settings.tts_endpoint) or self.tencent_enabled
+        return bool(settings.tts_endpoint) or self.edge_enabled or self.tencent_enabled
 
     async def synthesize(self, text: str) -> str | None:
         """返回合成音频的存储 key；未接入或文本为空时返回 None。"""
@@ -39,6 +43,8 @@ class TTSClient:
             return None
         if settings.tts_endpoint:
             return await self._http_synthesize(text)
+        if self.edge_enabled:
+            return await self._edge_synthesize(text)
         if self.tencent_enabled:
             return await self._tencent_synthesize(text)
         return None
@@ -53,6 +59,23 @@ class TTSClient:
         if not ref:
             raise RuntimeError("TTS 服务未返回 audio_url/key")
         return ref
+
+    async def _edge_synthesize(self, text: str) -> str:
+        """edge-tts 合成：输出 mp3 到本地存储，返回存储 key。"""
+        import edge_tts
+
+        key = f"tts/{uuid.uuid4().hex}.mp3"
+        out_path = storage.local_path(key)
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+
+        communicate = edge_tts.Communicate(
+            text=text,
+            voice=settings.tts_edge_voice,
+            rate=settings.tts_edge_rate,
+            volume=settings.tts_edge_volume,
+        )
+        await communicate.save(out_path)
+        return key
 
     async def _tencent_synthesize(self, text: str) -> str:
         if FFMPEG is None:

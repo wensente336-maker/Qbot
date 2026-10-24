@@ -1,13 +1,12 @@
-"""ASR 转写客户端（三档优先级，可平滑切换）。
+"""ASR 转写客户端（多档优先级，可平滑切换）。
 
-1. `ASR_ENDPOINT`：自建服务（FunASR / 其它），约定 `POST {audio}` 返回
+1. `ASR_ENDPOINT`：自定义服务，约定 `POST {audio}` 返回
    `{"text": str, "timestamp": [{"word","start_ms","end_ms"}]}`。
-2. `TENCENT_SECRET_ID/KEY`：腾讯云「录音文件识别」云 API——本地音轨压成 16k 单声道 mp3
+2. `ASR_OPENAI_BASE_URL`：OpenAI 兼容 faster-whisper（如宿主机 meeting-minutes-stt），
+   multipart 上传 + `response_format=verbose_json`，优先取词级时间戳、缺失时按句退化。
+3. `TENCENT_SECRET_ID/KEY`：腾讯云「录音文件识别」云 API——本地音轨压成 16k 单声道 mp3
    后 base64 直传（SourceType=1，无需 COS），轮询任务结果并展开为词级时间轴。
-3. 两者都未配置：内置 mock 占位词，保证全链路可跑。
-
-主机选型结论见 docs：4C/3.6G 无 GPU 的 CVM 不适合自建 FunASR（runtime 官方建议 4C8G），
-因此生产默认走第 2 档。
+4. 都未配置：内置 mock 占位词，保证全链路可跑。
 """
 
 import asyncio
@@ -32,13 +31,19 @@ class ASRClient:
         return bool(settings.tencent_secret_id and settings.tencent_secret_key)
 
     @property
+    def openai_enabled(self) -> bool:
+        return bool(settings.asr_openai_base_url)
+
+    @property
     def mock_enabled(self) -> bool:
-        return not settings.asr_endpoint and not self.tencent_enabled
+        return not settings.asr_endpoint and not self.openai_enabled and not self.tencent_enabled
 
     async def transcribe(self, media_ref: str) -> dict:
         """对音视频引用执行转写，返回词级时间轴。"""
         if settings.asr_endpoint:
             return await self._http_transcribe(media_ref)
+        if self.openai_enabled:
+            return await self._openai_transcribe(media_ref)
         if self.tencent_enabled:
             return await self._tencent_transcribe(media_ref)
         return self._mock_transcribe()
@@ -62,7 +67,51 @@ class ASRClient:
             ],
         }
 
-    # ---------- 模式 2：腾讯云录音文件识别 ----------
+    # ---------- 模式 2：OpenAI 兼容 faster-whisper ----------
+    async def _openai_transcribe(self, media_ref: str) -> dict:
+        source = _resolve_local_path(media_ref)
+        if not os.path.isfile(source):
+            raise ValueError(f"音频文件不存在：{source}")
+
+        audio_path = await _extract_audio(source)
+        try:
+            return await self._post_openai(audio_path)
+        finally:
+            if os.path.isfile(audio_path):
+                os.remove(audio_path)
+
+    @staticmethod
+    async def _post_openai(audio_path: str) -> dict:
+        base = settings.asr_openai_base_url.rstrip("/")
+        url = f"{base}/audio/transcriptions"
+        headers = {}
+        if settings.asr_openai_api_key:
+            headers["Authorization"] = f"Bearer {settings.asr_openai_api_key}"
+
+        with open(audio_path, "rb") as fh:
+            audio_bytes = fh.read()
+
+        model = settings.asr_openai_model or "whisper-1"
+        form: list[tuple[str, str]] = [
+            ("model", model),
+            ("response_format", "verbose_json"),
+        ]
+        files = {"file": (os.path.basename(audio_path), audio_bytes, "audio/mpeg")}
+
+        async with httpx.AsyncClient(timeout=600) as client:
+            # 优先请求词级时间戳；不受支持时丢弃该参数重试
+            resp = await client.post(
+                url, headers=headers, data=form + [("timestamp_granularities[]", "word")], files=files
+            )
+            if resp.status_code >= 400:
+                resp = await client.post(url, headers=headers, data=form, files=files)
+            resp.raise_for_status()
+            payload = resp.json()
+
+        text, words = parse_whisper_result(payload)
+        return {"text": text, "words": words}
+
+    # ---------- 模式 3：腾讯云录音文件识别 ----------
     async def _tencent_transcribe(self, media_ref: str) -> dict:
         source = _resolve_local_path(media_ref)
         if not os.path.isfile(source):
@@ -87,7 +136,7 @@ class ASRClient:
             if os.path.isfile(audio_path):
                 os.remove(audio_path)
 
-    # ---------- 模式 3：mock ----------
+    # ---------- 模式 4：mock ----------
     @staticmethod
     def _mock_transcribe() -> dict:
         words = [
@@ -216,6 +265,47 @@ def parse_result_detail(result_detail: list[dict]) -> tuple[str, list[dict]]:
             # 无词粒度时退化为整句时间戳，保证时间轴不空
             words.append({"word": final, "start_ms": start, "end_ms": max(end, start)})
     return "".join(texts), words
+
+
+def parse_whisper_result(data: dict) -> tuple[str, list[dict]]:
+    """把 OpenAI 兼容 verbose_json 响应展开为词级时间轴（秒 → 毫秒）。
+
+    - segments 内若含 `words`（词级时间戳）则逐词展开；
+    - 否则按 segments 的 start/end 退化到「句级」时间轴，保证粗剪可用。
+    """
+    segments = data.get("segments") or []
+    has_words = any((seg.get("words") or []) for seg in segments)
+
+    texts: list[str] = []
+    words: list[dict] = []
+    for seg in segments:
+        text = (seg.get("text") or "").strip()
+        if text:
+            texts.append(text)
+        start = seg.get("start") or 0.0
+        end = seg.get("end") or start
+        if has_words:
+            for token in seg.get("words") or []:
+                word = (token.get("word") or "").strip()
+                if not word:
+                    continue
+                words.append(
+                    {
+                        "word": word,
+                        "start_ms": int(round(float(token.get("start", start)) * 1000)),
+                        "end_ms": int(round(float(token.get("end", end)) * 1000)),
+                    }
+                )
+        elif text:
+            words.append(
+                {
+                    "word": text,
+                    "start_ms": int(round(float(start) * 1000)),
+                    "end_ms": int(round(float(end) * 1000)),
+                }
+            )
+    full_text = data.get("text") or "".join(texts)
+    return full_text, words
 
 
 asr = ASRClient()

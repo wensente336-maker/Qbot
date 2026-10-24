@@ -1,6 +1,6 @@
-"""腾讯云 ASR / TTS 适配层的纯函数测试（不依赖真实凭据）。"""
+"""ASR / TTS 适配层的纯函数测试（不依赖真实凭据/网络）。"""
 
-from app.core.asr import ASRClient, parse_result_detail
+from app.core.asr import ASRClient, parse_result_detail, parse_whisper_result
 from app.core.tts import split_text
 
 
@@ -53,3 +53,50 @@ def test_split_text_hard_cuts_long_sentence() -> None:
 
 def test_split_text_empty() -> None:
     assert split_text("   ") == []
+
+
+def test_parse_whisper_result_word_level() -> None:
+    data = {
+        "text": "你好今天",
+        "segments": [
+            {
+                "text": "你好",
+                "start": 0.0,
+                "end": 1.2,
+                "words": [
+                    {"word": "你", "start": 0.0, "end": 0.6},
+                    {"word": "好", "start": 0.6, "end": 1.2},
+                ],
+            },
+            {
+                "text": "今天",
+                "start": 1.2,
+                "end": 2.4,
+                "words": [{"word": "今天", "start": 1.2, "end": 2.4}],
+            },
+        ],
+    }
+    text, words = parse_whisper_result(data)
+    assert text == "你好今天"
+    assert words[0] == {"word": "你", "start_ms": 0, "end_ms": 600}
+    assert words[1] == {"word": "好", "start_ms": 600, "end_ms": 1200}
+    assert words[2] == {"word": "今天", "start_ms": 1200, "end_ms": 2400}
+
+
+def test_parse_whisper_result_segment_fallback() -> None:
+    data = {
+        "text": "你好今天",
+        "segments": [
+            {"text": "你好", "start": 0.0, "end": 1.2},
+            {"text": "今天", "start": 1.2, "end": 2.4},
+        ],
+    }
+    text, words = parse_whisper_result(data)
+    assert text == "你好今天"
+    # 无词级时间戳时退化为句级
+    assert words[0] == {"word": "你好", "start_ms": 0, "end_ms": 1200}
+    assert words[1] == {"word": "今天", "start_ms": 1200, "end_ms": 2400}
+
+
+def test_parse_whisper_result_empty() -> None:
+    assert parse_whisper_result({}) == ("", [])

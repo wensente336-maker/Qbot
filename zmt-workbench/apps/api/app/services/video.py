@@ -24,7 +24,9 @@ from app.core.render import (
 )
 from app.core.storage import storage
 from app.core.timeline import build_remap, merge_cuts
+from app.core.tts import tts
 from app.models.project import ContentProject
+from app.models.script import Script
 from app.models.system import AssetFile
 from app.models.video import VideoAsset, VideoJob
 from app.services.billing import record_llm_usage
@@ -206,3 +208,44 @@ async def run_qa(db: AsyncSession, user_id: int, job_id: int) -> VideoJob:
     await db.commit()
     await db.refresh(job)
     return job
+
+
+async def synthesize_narration(
+    db: AsyncSession, user_id: int, project_id: int
+) -> VideoJob:
+    """读取项目最新文案，调用 TTS 合成口播音频并登记为 voiceover 资产。"""
+    await _get_owned_project(db, project_id, user_id)
+
+    script = await db.scalar(select(Script).where(Script.project_id == project_id))
+    text = (script.content or "").strip() if script else ""
+    if not text:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "暂无文案，请先生成脚本")
+
+    job = await _new_job(db, project_id, "tts", {"chars": len(text)})
+
+    key = await tts.synthesize(text)
+    if key is None:
+        raise HTTPException(
+            status.HTTP_501_NOT_IMPLEMENTED,
+            "TTS 未接入：请配置 TTS_ENDPOINT / TTS_EDGE_VOICE / TENCENT_SECRET_ID 任一",
+        )
+
+    path = storage.local_path(key)
+    asset = AssetFile(
+        bucket="local",
+        key=key,
+        url=f"/media/{key}",
+        size_bytes=os.path.getsize(path),
+        content_type="audio/mpeg",
+        lifecycle="render-output",
+        status="uploaded",
+    )
+    db.add(asset)
+    await db.flush()
+    db.add(VideoAsset(project_id=project_id, kind="voiceover", asset_file_id=asset.id))
+
+    return await _finish(
+        db,
+        job,
+        {"output_key": key, "url": f"/media/{key}", "status": "synthesized", "chars": len(text)},
+    )

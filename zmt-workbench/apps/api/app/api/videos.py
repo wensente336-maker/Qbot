@@ -20,6 +20,7 @@ from app.services.video import (
     render_video,
     rough_cut,
     run_qa,
+    synthesize_narration,
     transcribe_video,
 )
 
@@ -102,3 +103,14 @@ async def qa(
     db: AsyncSession = Depends(get_db),
 ) -> VideoJob:
     return await run_qa(db, current_user.id, job_id)
+
+
+@router.post(
+    "/{project_id}/tts", response_model=VideoJobRead, status_code=status.HTTP_201_CREATED
+)
+async def tts_synthesize(
+    project_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> VideoJob:
+    return await synthesize_narration(db, current_user.id, project_id)
