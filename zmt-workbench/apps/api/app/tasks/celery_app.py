@@ -8,6 +8,7 @@
 """
 
 from celery import Celery
+from celery.schedules import crontab
 from kombu import Queue
 
 from app.core.config import settings
@@ -16,7 +17,7 @@ celery = Celery(
     "zmt",
     broker=settings.redis_url,
     backend=settings.redis_url,
-    include=["app.tasks.tasks"],
+    include=["app.tasks.tasks", "app.tasks.media_cleanup"],
 )
 
 celery.conf.update(
@@ -38,11 +39,17 @@ celery.conf.update(
         "app.tasks.analyze": {"queue": "analyze"},
         "app.tasks.render": {"queue": "render"},
         "app.tasks.ping": {"queue": "monitor"},
+        "app.tasks.cleanup_media": {"queue": "monitor"},
     },
     beat_schedule={
         "monitor-benchmark-every-1h": {
             "task": "app.tasks.monitor",
             "schedule": 60 * 60,
+        },
+        # 媒体生命周期清理：每天 03:15（低峰期）
+        "cleanup-media-daily": {
+            "task": "app.tasks.cleanup_media",
+            "schedule": crontab(hour=3, minute=15),
         },
     },
 )

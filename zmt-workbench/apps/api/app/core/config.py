@@ -88,6 +88,10 @@ class Settings(BaseSettings):
     # 本地开发默认放行 Next dev server。
     cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
 
+    # 媒体生命周期（天）：benchmark 7 天、user-uploads 30 天；render-output 永久保留
+    benchmark_retention_days: int = 7
+    upload_retention_days: int = 30
+
 
 @lru_cache
 def get_settings() -> Settings:
