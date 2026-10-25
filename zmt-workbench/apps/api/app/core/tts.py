@@ -1,9 +1,11 @@
 """TTS 口播合成客户端（多档优先级）。
 
 1. `TTS_ENDPOINT`：自定义服务，约定 `POST {text}` 返回 `{"audio_url"|"key": str}`。
-2. `TTS_EDGE_VOICE`：edge-tts 微软 Edge 朗读引擎（零算力，输出 mp3），voice 非空即启用。
-3. `TENCENT_SECRET_ID/KEY`：腾讯云「语音合成」云 API——按标点分块后 ffmpeg 拼接。
-4. 都未配置：返回 None，由调用方走「上传口播音频」的兜底路径。
+2. `TTS_OPENAI_BASE_URL`：OpenAI 兼容语音网关（如宿主机 speech-gateway），
+   `POST {base}/audio/speech` 直接返回音频字节，落盘为 mp3。
+3. `TTS_EDGE_VOICE`：edge-tts 微软 Edge 朗读引擎（零算力，输出 mp3），voice 非空即启用。
+4. `TENCENT_SECRET_ID/KEY`：腾讯云「语音合成」云 API——按标点分块后 ffmpeg 拼接。
+5. 都未配置：返回 None，由调用方走「上传口播音频」的兜底路径。
 """
 
 import asyncio
@@ -22,6 +24,9 @@ from app.core.storage import storage
 # 同步接口单次合成长度有限，按块提交并留出余量
 TTS_CHUNK_LIMIT = 140
 
+# 语音网关单次请求上限（speech-gateway 限制 2000 字符），留余量
+GW_CHUNK_LIMIT = 1800
+
 
 class TTSClient:
     @property
@@ -33,8 +38,17 @@ class TTSClient:
         return bool(settings.tts_edge_voice)
 
     @property
+    def gateway_enabled(self) -> bool:
+        return bool(settings.tts_openai_base_url)
+
+    @property
     def enabled(self) -> bool:
-        return bool(settings.tts_endpoint) or self.edge_enabled or self.tencent_enabled
+        return (
+            bool(settings.tts_endpoint)
+            or self.gateway_enabled
+            or self.edge_enabled
+            or self.tencent_enabled
+        )
 
     async def synthesize(self, text: str) -> str | None:
         """返回合成音频的存储 key；未接入或文本为空时返回 None。"""
@@ -43,6 +57,8 @@ class TTSClient:
             return None
         if settings.tts_endpoint:
             return await self._http_synthesize(text)
+        if self.gateway_enabled:
+            return await self._gateway_synthesize(text)
         if self.edge_enabled:
             return await self._edge_synthesize(text)
         if self.tencent_enabled:
@@ -59,6 +75,62 @@ class TTSClient:
         if not ref:
             raise RuntimeError("TTS 服务未返回 audio_url/key")
         return ref
+
+    async def _gateway_synthesize(self, text: str) -> str:
+        """OpenAI 兼容语音网关：直出音频字节，落盘为 mp3；超长文本分块后拼接。"""
+        key = f"tts/{uuid.uuid4().hex}.mp3"
+        out_path = storage.local_path(key)
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+
+        chunks = split_text(text, GW_CHUNK_LIMIT)
+        if len(chunks) <= 1:
+            audio = await self._gateway_bytes(text)
+            with open(out_path, "wb") as fh:
+                fh.write(audio)
+            return key
+
+        if FFMPEG is None:
+            raise RuntimeError("未找到 ffmpeg，无法拼接合成音频")
+        parts: list[str] = []
+        try:
+            for chunk in chunks:
+                audio = await self._gateway_bytes(chunk)
+                fd, part = tempfile.mkstemp(suffix=".mp3", prefix="tts-")
+                with os.fdopen(fd, "wb") as fh:
+                    fh.write(audio)
+                parts.append(part)
+            await _concat_mp3(parts, out_path)
+        finally:
+            for part in parts:
+                if os.path.isfile(part):
+                    os.remove(part)
+        return key
+
+    @staticmethod
+    async def _gateway_bytes(text: str) -> bytes:
+        base = settings.tts_openai_base_url.rstrip("/")
+        payload: dict = {"input": text}
+        if settings.tts_openai_voice:
+            payload["voice"] = settings.tts_openai_voice
+        if settings.tts_openai_speed is not None:
+            payload["speed"] = settings.tts_openai_speed
+        headers = {}
+        if settings.tts_openai_api_key:
+            headers["Authorization"] = f"Bearer {settings.tts_openai_api_key}"
+
+        async with httpx.AsyncClient(timeout=180) as client:
+            resp = await client.post(f"{base}/audio/speech", json=payload, headers=headers)
+            resp.raise_for_status()
+            if "application/json" in (resp.headers.get("content-type") or ""):
+                data = resp.json()
+                ref = data.get("audio_url") or data.get("key")
+                if not ref:
+                    raise RuntimeError("TTS 网关未返回音频")
+                raise RuntimeError(f"TTS 网关返回的是音频引用（{ref}），请改用 TTS_ENDPOINT 配置")
+            audio = resp.content
+        if not audio:
+            raise RuntimeError("TTS 网关返回空音频")
+        return audio
 
     async def _edge_synthesize(self, text: str) -> str:
         """edge-tts 合成：输出 mp3 到本地存储，返回存储 key。"""

@@ -92,16 +92,18 @@ class ASRClient:
             audio_bytes = fh.read()
 
         model = settings.asr_openai_model or "whisper-1"
-        form: list[tuple[str, str]] = [
-            ("model", model),
-            ("response_format", "verbose_json"),
-        ]
+        # 注意：data 必须是 Mapping；httpx 0.28 下传「元组列表」会被当作同步迭代器，
+        # AsyncClient 直接抛 "Attempted to send an sync request with an AsyncClient instance"
+        form: dict[str, str] = {
+            "model": model,
+            "response_format": "verbose_json",
+        }
         files = {"file": (os.path.basename(audio_path), audio_bytes, "audio/mpeg")}
 
         async with httpx.AsyncClient(timeout=600) as client:
             # 优先请求词级时间戳；不受支持时丢弃该参数重试
             resp = await client.post(
-                url, headers=headers, data=form + [("timestamp_granularities[]", "word")], files=files
+                url, headers=headers, data={**form, "timestamp_granularities[]": "word"}, files=files
             )
             if resp.status_code >= 400:
                 resp = await client.post(url, headers=headers, data=form, files=files)

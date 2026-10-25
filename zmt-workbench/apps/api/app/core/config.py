@@ -39,6 +39,12 @@ class Settings(BaseSettings):
     tts_endpoint: str = ""
     tts_voice: str = "default"
 
+    # TTS（OpenAI 兼容语音网关，如宿主机 speech-gateway：POST {base}/audio/speech 直出音频字节）
+    tts_openai_base_url: str = ""
+    tts_openai_api_key: str = ""
+    tts_openai_voice: str = ""
+    tts_openai_speed: int | None = None
+
     # TTS（edge-tts 微软 Edge 朗读引擎；voice 非空即启用，优先级高于腾讯云）
     tts_edge_voice: str = ""
     tts_edge_rate: str = "+0%"
