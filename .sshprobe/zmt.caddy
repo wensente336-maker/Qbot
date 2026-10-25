@@ -1,0 +1,14 @@
+# 自媒体 AI 工作台：/zmt 页面 + /zmt/api 接口 + /media 成片直出
+# 单独成文件并用 00 前缀排序，避免被 diag-tool 末尾的兜底 handle 截断，也不随其重写而丢失。
+route {
+    handle /zmt/api/* {
+        uri strip_prefix /zmt
+        reverse_proxy 127.0.0.1:8090
+    }
+    handle /media/* {
+        reverse_proxy 127.0.0.1:8090
+    }
+    handle /zmt* {
+        reverse_proxy 127.0.0.1:3010
+    }
+}

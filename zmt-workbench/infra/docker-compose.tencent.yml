@@ -1,0 +1,112 @@
+# 腾讯云 Lighthouse 单机部署（host 网络模式）
+#
+# 为什么用 host 网络：宿主机上的 speech-gateway（ASR/TTS）只监听 127.0.0.1:8100，
+# 容器走 bridge 网络访问不到；host 网络下直接复用 127.0.0.1。
+#
+# 端口规划（避开已占用的 8000 fde-workbench、5432 其 postgres、80/443 caddy）：
+#   api  → 127.0.0.1:8090
+#   web  → 0.0.0.0:3010
+#   db   → 127.0.0.1:5433
+#   redis→ 宿主机 apt 安装的 redis-server，127.0.0.1:6379
+#
+# 用法：cd /opt/zmt-workbench/infra && docker compose -f docker-compose.tencent.yml up -d --build
+
+x-api-base: &api-base
+  image: zmt-api:latest
+  build:
+    context: ../apps/api
+    args:
+      PIP_INDEX_URL: http://mirrors.tencentyun.com/pypi/simple/
+      PIP_TRUSTED_HOST: mirrors.tencentyun.com
+  network_mode: host
+  # 宿主机重启 / docker daemon 重启后自动拉起（单机部署没有编排层兜底）
+  restart: unless-stopped
+  env_file:
+    - path: ../apps/api/.env
+      required: false
+  environment:
+    DATABASE_URL: postgresql+asyncpg://zmt:zmt@127.0.0.1:5433/zmt
+    REDIS_URL: redis://127.0.0.1:6379/0
+    SECRET_KEY: ${SECRET_KEY:-dev-only-change-me}
+    ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-1440}
+    LOCAL_MEDIA_DIR: /data/media
+  volumes:
+    - media:/data/media
+  depends_on:
+    postgres:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:17.6-bookworm
+    container_name: zmt-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: zmt
+      POSTGRES_PASSWORD: zmt
+      POSTGRES_DB: zmt
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U zmt -d zmt"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    <<: *api-base
+    container_name: zmt-api
+    command:
+      - sh
+      - -c
+      - "alembic upgrade head && uvicorn app.main:app --host 127.0.0.1 --port 8090"
+
+  worker-monitor:
+    <<: *api-base
+    container_name: zmt-worker-monitor
+    command: ["celery", "-A", "app.tasks.celery_app:celery", "worker", "-Q", "monitor", "--concurrency=1", "--loglevel=info"]
+
+  worker-transcribe:
+    <<: *api-base
+    container_name: zmt-worker-transcribe
+    command: ["celery", "-A", "app.tasks.celery_app:celery", "worker", "-Q", "transcribe", "--concurrency=1", "--loglevel=info"]
+
+  worker-analyze:
+    <<: *api-base
+    container_name: zmt-worker-analyze
+    command: ["celery", "-A", "app.tasks.celery_app:celery", "worker", "-Q", "analyze", "--concurrency=2", "--loglevel=info"]
+
+  worker-render:
+    <<: *api-base
+    container_name: zmt-worker-render
+    command: ["celery", "-A", "app.tasks.celery_app:celery", "worker", "-Q", "render", "--concurrency=1", "--loglevel=info"]
+
+  beat:
+    <<: *api-base
+    container_name: zmt-beat
+    command: ["celery", "-A", "app.tasks.celery_app:celery", "beat", "--loglevel=info"]
+
+  web:
+    image: zmt-web:latest
+    build:
+      context: ../apps/web
+      args:
+        # 公网经 Caddy 443 反代到 /zmt/ 前缀：页面走 basePath，API 走 /zmt/api/*
+        NEXT_BASE_PATH: "/zmt"
+        NEXT_PUBLIC_API_URL: "/zmt"
+        BACKEND_URL: "http://127.0.0.1:8090"
+    network_mode: host
+    container_name: zmt-web
+    restart: unless-stopped
+    environment:
+      PORT: "3010"
+      # host 网络下容器 hostname 会变成宿主机名，Next standalone 默认只绑该地址，显式指定 0.0.0.0
+      HOSTNAME: "0.0.0.0"
+    depends_on:
+      - api
+
+volumes:
+  pgdata:
+  media:

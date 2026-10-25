@@ -1,0 +1,4 @@
+SHELL=/bin/sh
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# 每 10 分钟主机巡检（容器/接口/Redis/磁盘/内存/备份新鲜度），异常推送飞书告警
+*/10 * * * * root /opt/zmt-workbench/infra/scripts/healthcheck.py >> /var/log/zmt-health.log 2>&1
