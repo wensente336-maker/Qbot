@@ -1,6 +1,6 @@
 """发布 / 指标 / 成本 / 配额服务。"""
 
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 from fastapi import HTTPException, status
 from sqlalchemy import func, select
@@ -12,6 +12,7 @@ from app.models.publish import MetricDimension, MetricSnapshot, Publication
 from app.models.system import CostEvent, DailyQuota
 from app.schemas.publish import CostEventCreate, MetricSyncRequest, PublicationCreate
 from app.services.billing import record_llm_usage
+from app.services.quota import ensure_quota, get_daily
 
 DEFAULT_DIMENSIONS = [
     {
@@ -224,9 +225,11 @@ async def _weekly_summary(
     )
     user = f"项目：{project_id or '全部'}\n指标：{metrics}"
     try:
+        # 周报是只读看板的一部分，配额用尽时降级为本地结论而不是 429
+        await ensure_quota(db, "llm", 0)
         data = await llm.json(system, user)
         await record_llm_usage(db, project_id=project_id)
-    except Exception:  # noqa: BLE001 - 网络/解析失败时退回本地结论
+    except Exception:  # noqa: BLE001 - 配额用尽/网络/解析失败时退回本地结论
         return _fallback_weekly_summary(metrics)
 
     summary = str(data.get("summary") or "").strip()
@@ -234,21 +237,10 @@ async def _weekly_summary(
 
 
 async def get_quota(db: AsyncSession, category: str) -> DailyQuota:
-    today = date.today()
-    q = await db.scalar(
-        select(DailyQuota).where(DailyQuota.category == category, DailyQuota.quota_date == today)
-    )
-    if q is None:
-        q = DailyQuota(category=category, quota_date=today, used=0, quota_limit=0)
-        db.add(q)
-        await db.commit()
-        await db.refresh(q)
-    return q
+    """当日配额（限额随配置实时同步）。"""
+    return await get_daily(db, category)
 
 
 async def consume_quota(db: AsyncSession, category: str, amount: int = 1) -> DailyQuota:
-    q = await get_quota(db, category)
-    q.used += amount
-    await db.commit()
-    await db.refresh(q)
-    return q
+    """扣减配额；超过当日上限抛 429。"""
+    return await ensure_quota(db, category, amount)

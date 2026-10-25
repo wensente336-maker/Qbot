@@ -8,6 +8,7 @@ from app.core.llm import llm
 from app.models.project import ContentProject
 from app.models.script import Outline, Script, ScriptVersion
 from app.services.billing import record_llm_usage
+from app.services.quota import ensure_quota
 
 LENGTH_OPTIONS = (300, 500, 800)
 
@@ -47,6 +48,7 @@ async def generate_outline(db: AsyncSession, project_id: int, user_id: int) -> O
     if llm.mock_enabled:
         content = _mock_outline(project_id)
     else:
+        await ensure_quota(db, "llm", 0)  # token 数无法预估，调用前只校验剩余额度
         content = await llm.json(
             "你是短视频大纲专家，输出 JSON 对象 {title, sections:[{name, point}]}。",
             f"项目 #{project_id}，为其生成口播大纲。",
@@ -95,6 +97,7 @@ async def generate_script(
     if llm.mock_enabled:
         content = _mock_script(project_id, length)
     else:
+        await ensure_quota(db, "llm", 0)
         system = (
             "你是短视频口播文案专家，按给定写作技巧/情绪强度输出 JSON 对象 {content}，"
             f"字数约 {length} 字。"
@@ -148,6 +151,7 @@ async def rewrite_segment(
     if llm.mock_enabled:
         new_segment = f"{segment}「已按：{instruction} 改写（占位）」"
     else:
+        await ensure_quota(db, "llm", 0)
         data = await llm.json(
             "你是文案编辑，仅按指令改写给定段落，输出 JSON 对象 {content}。",
             f"原段落：{segment}\n改写指令：{instruction}",

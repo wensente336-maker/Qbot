@@ -8,6 +8,7 @@ from app.models.benchmark import SourceWork
 from app.models.topic import Topic
 from app.schemas.topic import TopicGenerateRequest
 from app.services.billing import record_llm_usage
+from app.services.quota import ensure_quota
 
 
 def _mock_angles(count: int, base: str) -> list[dict]:
@@ -48,6 +49,7 @@ async def generate_topics(
         angles = _mock_angles(payload.count, base)
         recommendation_base = None
     else:
+        await ensure_quota(db, "llm", 0)
         system = (
             "你是短视频选题策划专家。输出 JSON 数组，每项含 "
             "{title, viewpoint, audience, angle, recommendation}。"

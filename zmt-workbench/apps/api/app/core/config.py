@@ -92,6 +92,10 @@ class Settings(BaseSettings):
     benchmark_retention_days: int = 7
     upload_retention_days: int = 30
 
+    # 每日配额上限（JSON），留空用内置默认值；某类别填 0 表示不限
+    # 默认：llm 200 万 tokens、tts_char 5 万字、transcribe 30 次、render 20 次
+    quota_limits: str = ""
+
 
 @lru_cache
 def get_settings() -> Settings:

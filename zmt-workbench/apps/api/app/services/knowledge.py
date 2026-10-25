@@ -7,6 +7,7 @@ from app.core.config import settings
 from app.core.llm import llm
 from app.models.knowledge import KnowledgeCard, KnowledgeCardVersion, KnowledgeSource
 from app.services.billing import record_llm_usage
+from app.services.quota import ensure_quota
 
 
 async def generate_card(
@@ -17,6 +18,7 @@ async def generate_card(
         title, viewpoint = "占位卡片标题", "由素材聚合出的观点（占位）"
         model = "mock"
     else:
+        await ensure_quota(db, "llm", 0)
         system = "你是知识卡片整理专家，从素材中提炼观点。输出 JSON：{title, viewpoint}。"
         user = f"素材 ID 列表：{source_work_ids or []}"
         data = await llm.json(system, user)

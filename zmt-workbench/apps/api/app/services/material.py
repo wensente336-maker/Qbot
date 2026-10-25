@@ -12,6 +12,7 @@ from app.core.llm import llm
 from app.models.benchmark import Creator, MaterialFeature, SourceWork
 from app.schemas.material import SourceWorkCreate
 from app.services.billing import record_llm_usage
+from app.services.quota import ensure_quota
 
 _FEATURE_SEPARATORS = re.compile(r"[,，、;；/\n|]+")
 
@@ -121,6 +122,7 @@ async def extract_features(db: AsyncSession, work_id: int) -> MaterialFeature:
         }
         model = "mock"
     else:
+        await ensure_quota(db, "llm", 0)
         system = "你是短视频素材分析专家，输出 JSON 字段：theme/audience/core_viewpoint/hook/structure/emotion/features。"
         user = f"素材标题：{work.title or ''}\n文案：{work.caption or ''}"
         data = await llm.json(system, user)

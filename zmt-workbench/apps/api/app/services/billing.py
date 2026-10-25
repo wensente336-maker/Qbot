@@ -4,13 +4,11 @@
 接入真实计费或不同模型时在 LLM_PRICE_PER_M 中补充即可。
 """
 
-from datetime import date
-
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.llm import llm
-from app.models.system import CostEvent, DailyQuota
+from app.models.system import CostEvent
+from app.services.quota import add_usage
 
 # 元 / 百万 tokens
 LLM_PRICE_PER_M: dict[str, dict[str, float]] = {
@@ -20,16 +18,8 @@ DEFAULT_PRICE = {"input": 1.0, "output": 2.0}
 
 
 async def _bump_daily_quota(db: AsyncSession, category: str, amount: int) -> None:
-    """按 token 总量累加当日配额使用计数。"""
-    today = date.today()
-    q = await db.scalar(
-        select(DailyQuota).where(DailyQuota.category == category, DailyQuota.quota_date == today)
-    )
-    if q is None:
-        q = DailyQuota(category=category, quota_date=today, used=0, quota_limit=0)
-        db.add(q)
-    q.used += amount
-    await db.flush()
+    """按 token 总量累加当日配额使用计数（不拦截，拦截在调用前由 ensure_quota 完成）。"""
+    await add_usage(db, category, amount, commit=False)
 
 
 async def record_llm_usage(

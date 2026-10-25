@@ -28,6 +28,7 @@ from app.models.script import Script
 from app.models.system import AssetFile
 from app.models.video import VideoAsset, VideoJob
 from app.services.billing import record_llm_usage
+from app.services.quota import ensure_quota
 
 
 async def _get_owned_project(db: AsyncSession, project_id: int, user_id: int) -> ContentProject:
@@ -58,6 +59,7 @@ async def transcribe_video(
     db: AsyncSession, user_id: int, project_id: int, asset_ref: str
 ) -> VideoJob:
     await _get_owned_project(db, project_id, user_id)
+    await ensure_quota(db, "transcribe")  # 超额直接 429，不再白跑一次转写
     job = await _new_job(db, project_id, "transcribe", {"asset_ref": asset_ref})
     result = await asr.transcribe(asset_ref)  # mock 时返回占位词级时间轴
     return await _finish(db, job, result)
@@ -145,6 +147,7 @@ async def generate_storyboard(
     if llm.mock_enabled:
         segments = _mock_storyboard(project_id)
     else:
+        await ensure_quota(db, "llm", 0)  # 分镜走 LLM 时才校验 token 配额
         segments = await llm.json_list(
             "你是分镜导演，输出 JSON 数组，每项含 {index,start_ms,end_ms,visual,subtitle,visual_skill}。",
             f"项目 #{project_id}，脚本 ID={script_id}",
@@ -283,6 +286,7 @@ async def render_video(
     db: AsyncSession, user_id: int, project_id: int, composition: str, resolution: str, fps: int
 ) -> VideoJob:
     await _get_owned_project(db, project_id, user_id)
+    await ensure_quota(db, "render")  # 出片最耗 CPU，超额直接 429
     job = await _new_job(
         db,
         project_id,
@@ -335,6 +339,7 @@ async def synthesize_narration(
     if not text:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "暂无文案，请先生成脚本")
 
+    await ensure_quota(db, "tts_char", len(text))  # 按字数预扣，超额 429
     job = await _new_job(db, project_id, "tts", {"chars": len(text)})
 
     key = await tts.synthesize(text)
