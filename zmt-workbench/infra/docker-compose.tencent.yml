@@ -19,6 +19,8 @@ x-api-base: &api-base
       PIP_INDEX_URL: http://mirrors.tencentyun.com/pypi/simple/
       PIP_TRUSTED_HOST: mirrors.tencentyun.com
   network_mode: host
+  # 宿主机重启 / docker daemon 重启后自动拉起（单机部署没有编排层兜底）
+  restart: unless-stopped
   env_file:
     - path: ../apps/api/.env
       required: false
@@ -38,6 +40,7 @@ services:
   postgres:
     image: postgres:17.6-bookworm
     container_name: zmt-postgres
+    restart: unless-stopped
     environment:
       POSTGRES_USER: zmt
       POSTGRES_PASSWORD: zmt
@@ -96,6 +99,7 @@ services:
         BACKEND_URL: "http://127.0.0.1:8090"
     network_mode: host
     container_name: zmt-web
+    restart: unless-stopped
     environment:
       PORT: "3010"
       # host 网络下容器 hostname 会变成宿主机名，Next standalone 默认只绑该地址，显式指定 0.0.0.0
