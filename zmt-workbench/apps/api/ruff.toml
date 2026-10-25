@@ -1,0 +1,16 @@
+# Ruff 配置（lint + format）
+line-length = 100
+target-version = "py312"
+
+[lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+# B008：FastAPI 的 Depends 惯用写法（在参数默认值中调用），属预期模式
+ignore = ["E501", "B008"]
+
+[lint.per-file-ignores]
+# conftest 必须在 import app 之前写环境变量，import 顺序不可调整
+"tests/conftest.py" = ["E402"]
+
+[format]
+quote-style = "double"
+indent-style = "space"

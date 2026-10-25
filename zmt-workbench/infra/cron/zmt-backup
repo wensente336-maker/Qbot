@@ -1,0 +1,4 @@
+SHELL=/bin/sh
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# 每日 03:45 PostgreSQL 全库备份（保留 14 天），失败自动告警
+45 3 * * * root /opt/zmt-workbench/infra/scripts/backup_db.sh >> /var/log/zmt-backup.log 2>&1
