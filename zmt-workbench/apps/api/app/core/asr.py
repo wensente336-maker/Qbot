@@ -264,16 +264,81 @@ def parse_result_detail(result_detail: list[dict]) -> tuple[str, list[dict]]:
                     {"word": token, "start_ms": word_start, "end_ms": max(word_end, word_start)}
                 )
         elif final:
-            # 无词粒度时退化为整句时间戳，保证时间轴不空
-            words.append({"word": final, "start_ms": start, "end_ms": max(end, start)})
+            # 无词粒度时按句内标点切分，保证字幕/粗剪仍有分钟级以下的粒度
+            words.extend(timeline_from_text(final, start, max(end, start)))
     return "".join(texts), words
+
+
+# 句内切分：无词级时间戳时，把长句按标点切成可直接当单行字幕的短句
+# 10 字对应 1080x1920 竖屏下「字号 86px + 左右各 8% 安全区」的 QA 上限，超出会被质检判越界
+CLAUSE_DELIMS = "，,。！？!?；;：:、…"
+SUBTITLE_MAX_CHARS = 10
+
+
+def split_clauses(text: str, max_chars: int = SUBTITLE_MAX_CHARS) -> list[str]:
+    """把一段口播文本切成不超过 max_chars 的单行字幕短句。"""
+    text = (text or "").strip()
+    if not text:
+        return []
+
+    parts: list[str] = []
+    buf = ""
+    for ch in text:
+        buf += ch
+        if ch in CLAUSE_DELIMS:
+            if buf.strip(CLAUSE_DELIMS + " \t"):
+                parts.append(buf.strip())
+            buf = ""
+    if buf.strip():
+        parts.append(buf.strip())
+
+    # 标点切完仍然超长（无标点的连续口播）→ 按字数硬切
+    chunks: list[str] = []
+    for part in parts:
+        while len(part) > max_chars:
+            chunks.append(part[:max_chars])
+            part = part[max_chars:]
+        if part:
+            chunks.append(part)
+
+    # 合并过短片段，避免字幕一闪而过
+    merged: list[str] = []
+    for chunk in chunks:
+        if merged and len(merged[-1]) + len(chunk) <= max_chars:
+            merged[-1] += chunk
+        else:
+            merged.append(chunk)
+    return merged
+
+
+def timeline_from_text(text: str, start_ms: int, end_ms: int) -> list[dict]:
+    """句级退化：按字数比例把 [start_ms, end_ms] 分配给切分后的短句。"""
+    clauses = split_clauses(text)
+    if not clauses:
+        return []
+
+    start_ms = int(start_ms)
+    end_ms = max(int(end_ms), start_ms + len(clauses) * 200)
+    total = sum(len(c) for c in clauses) or 1
+    span = end_ms - start_ms
+
+    words: list[dict] = []
+    cursor = start_ms
+    acc = 0
+    for clause in clauses:
+        acc += len(clause)
+        stop = end_ms if acc >= total else start_ms + round(span * acc / total)
+        words.append({"word": clause, "start_ms": cursor, "end_ms": max(stop, cursor)})
+        cursor = stop
+    return words
 
 
 def parse_whisper_result(data: dict) -> tuple[str, list[dict]]:
     """把 OpenAI 兼容 verbose_json 响应展开为词级时间轴（秒 → 毫秒）。
 
     - segments 内若含 `words`（词级时间戳）则逐词展开；
-    - 否则按 segments 的 start/end 退化到「句级」时间轴，保证粗剪可用。
+    - 否则按 segments 的 start/end 退化为句级，再按标点做句内切分，
+      把 20~30 秒的长句拆成可做单行字幕的短句（时长按字数比例分配）。
     """
     segments = data.get("segments") or []
     has_words = any((seg.get("words") or []) for seg in segments)
@@ -299,13 +364,19 @@ def parse_whisper_result(data: dict) -> tuple[str, list[dict]]:
                     }
                 )
         elif text:
-            words.append(
-                {
-                    "word": text,
-                    "start_ms": int(round(float(start) * 1000)),
-                    "end_ms": int(round(float(end) * 1000)),
-                }
+            pieces = timeline_from_text(
+                text, int(round(float(start) * 1000)), int(round(float(end) * 1000))
             )
+            if pieces:
+                words.extend(pieces)
+            else:
+                words.append(
+                    {
+                        "word": text,
+                        "start_ms": int(round(float(start) * 1000)),
+                        "end_ms": int(round(float(end) * 1000)),
+                    }
+                )
     full_text = data.get("text") or "".join(texts)
     return full_text, words
 

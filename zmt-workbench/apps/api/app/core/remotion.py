@@ -123,7 +123,10 @@ async def render_composition(
 
 
 async def mux_audio(video_path: str, audio_path: str) -> bool:
-    """把口播音轨混入 Remotion 成片（视频流直拷，音频转 AAC）。"""
+    """把口播音轨混入成片（视频流直拷，音频转 AAC）。
+
+    口播短于视频时用 `apad` 补静音，成片时长仍以视频为准（-shortest 对无限音轨生效）。
+    """
     ffmpeg = shutil.which("ffmpeg")
     if ffmpeg is None:
         return False
@@ -143,6 +146,8 @@ async def mux_audio(video_path: str, audio_path: str) -> bool:
         "1:a:0",
         "-c:v",
         "copy",
+        "-af",
+        "apad",
         "-c:a",
         "aac",
         "-b:a",

@@ -10,13 +10,14 @@ from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.asr import asr
+from app.core.asr import SUBTITLE_MAX_CHARS, asr
 from app.core.llm import llm
 from app.core.qa import run_qa_checks
 from app.core.remotion import mux_audio, render_composition
 from app.core.render import (
     FFMPEG,
     estimated_duration_ms,
+    probe_duration_ms,
     render_to_file,
 )
 from app.core.storage import storage
@@ -86,11 +87,60 @@ def _mock_storyboard(project_id: int) -> list[dict]:
     ]
 
 
+def storyboard_from_words(words: list[dict], max_chars: int = SUBTITLE_MAX_CHARS) -> list[dict]:
+    """把 ASR 时间轴（词级或句内短句）打包成逐句字幕分镜。
+
+    每行字幕不超过 max_chars，起止时间取该行首末片段，保证字幕与口播对齐。
+    """
+    segments: list[dict] = []
+    buf: list[dict] = []
+
+    def flush() -> None:
+        if not buf:
+            return
+        text = "".join(w["word"] for w in buf).strip()
+        if text:
+            segments.append(
+                {
+                    "index": len(segments),
+                    "start_ms": buf[0]["start_ms"],
+                    "end_ms": max(buf[-1]["end_ms"], buf[0]["start_ms"]),
+                    "visual": "口播画面",
+                    "subtitle": text,
+                    "visual_skill": "default",
+                }
+            )
+        buf.clear()
+
+    for word in words or []:
+        token = str(word.get("word") or "").strip()
+        if not token:
+            continue
+        item = {
+            "word": token,
+            "start_ms": int(word.get("start_ms") or 0),
+            "end_ms": int(word.get("end_ms") or 0),
+        }
+        if buf and len("".join(w["word"] for w in buf)) + len(token) > max_chars:
+            flush()
+        buf.append(item)
+    flush()
+    return segments
+
+
 async def generate_storyboard(
     db: AsyncSession, user_id: int, project_id: int, script_id: int | None
 ) -> VideoJob:
     await _get_owned_project(db, project_id, user_id)
     job = await _new_job(db, project_id, "editing", {"script_id": script_id})
+
+    # 已有转写结果时，字幕直接用真实时间戳逐句生成，避免 LLM 编造时间轴
+    transcribe_job = await _latest_job(db, project_id, "transcribe")
+    words = (transcribe_job.result or {}).get("words") if transcribe_job else None
+    segments = storyboard_from_words(words or [])
+    if segments:
+        job.request = {**(job.request or {}), "source": "asr"}
+        return await _finish(db, job, {"segments": segments})
 
     if llm.mock_enabled:
         segments = _mock_storyboard(project_id)
@@ -130,14 +180,24 @@ async def _resolve_render_inputs(
             source_path = candidate
 
     segments: list[dict] = []
-    story_job = await _latest_job(db, project_id, "editing")
-    if story_job and isinstance((story_job.result or {}).get("segments"), list):
-        segments = story_job.result["segments"]
+    # 粗剪与分镜同为 editing 任务，按 id 倒序取最近一个真正含分镜的版本，
+    # 避免「先分镜后粗剪」把字幕时间轴覆盖掉
+    editing_jobs = await db.scalars(
+        select(VideoJob)
+        .where(VideoJob.project_id == project_id, VideoJob.job_type == "editing")
+        .order_by(VideoJob.id.desc())
+        .limit(10)
+    )
+    for editing_job in editing_jobs:
+        candidate = (editing_job.result or {}).get("segments")
+        if isinstance(candidate, list) and candidate:
+            segments = candidate
+            break
     return source_path, segments
 
 
 async def _attach_voiceover(db: AsyncSession, project_id: int, video_path: str) -> bool:
-    """若项目已有口播音频，则混流进 Remotion 成片。"""
+    """若项目已有口播音频，则混流进成片（Remotion / FFmpeg 出片均适用）。"""
     asset = await db.scalar(
         select(VideoAsset)
         .where(VideoAsset.project_id == project_id, VideoAsset.kind == "voiceover")
@@ -180,7 +240,6 @@ async def render_to_asset(
         duration_ms = await render_composition(segments, output_path, resolution, fps)
         if duration_ms is not None:
             engine = "remotion"
-            await _attach_voiceover(db, project_id, output_path)
 
     if duration_ms is None:
         if FFMPEG is None:
@@ -190,6 +249,11 @@ async def render_to_asset(
                 "status": "placeholder",
             }
         duration_ms = await render_to_file(source_path, output_path, resolution, fps, segments)
+
+    # 两种引擎产出的成片都补口播：有 voiceover 资产时替换音轨并补静音对齐视频时长
+    has_voiceover = await _attach_voiceover(db, project_id, output_path)
+    if has_voiceover:
+        duration_ms = await probe_duration_ms(output_path) or duration_ms
 
     asset = AssetFile(
         bucket="local",
@@ -210,6 +274,7 @@ async def render_to_asset(
         "duration_ms": duration_ms,
         "status": "rendered",
         "engine": engine,
+        "voiceover": has_voiceover,
         "segments": len(segments),
     }
 

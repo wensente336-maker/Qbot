@@ -147,6 +147,15 @@ async def main() -> None:
         tts_job, tts_s = await call(client, "POST", f"/videos/{project_id}/tts")
         print(f"tts={tts_s:.1f}s result={json.dumps(tts_job.get('result'), ensure_ascii=False)[:200]}")
 
+        log("分镜 / 逐句字幕（来自 ASR 时间轴）")
+        board, board_s = await call(client, "POST", f"/videos/{project_id}/storyboard", json={})
+        segments = (board.get("result") or {}).get("segments") or []
+        print(f"storyboard={board_s:.1f}s source={(board.get('request') or {}).get('source')} segments={len(segments)}")
+        for seg in segments[:3]:
+            print("  ", seg)
+        if segments:
+            print("  末句:", segments[-1])
+
         log("渲染出片（FFmpeg）")
         render_job, render_s = await call(
             client, "POST", f"/videos/{project_id}/render",
@@ -155,6 +164,9 @@ async def main() -> None:
         result = render_job.get("result") or {}
         print(f"render={render_s:.1f}s {json.dumps(result, ensure_ascii=False)[:300]}")
         out_path = os.path.join(MEDIA, result["output_key"])
+        srt_path = os.path.splitext(out_path)[0] + ".srt"
+        print("voiceover:", result.get("voiceover"), "| srt:", os.path.isfile(srt_path),
+              f"({len(open(srt_path, encoding='utf-8').read().splitlines()) if os.path.isfile(srt_path) else 0} 行)")
         if os.path.isfile(out_path):
             print("output probe:", ffprobe(out_path))
         else:

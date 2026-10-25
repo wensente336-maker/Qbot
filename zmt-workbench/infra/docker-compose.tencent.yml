@@ -86,10 +86,13 @@ services:
     command: ["celery", "-A", "app.tasks.celery_app:celery", "beat", "--loglevel=info"]
 
   web:
+    image: zmt-web:latest
     build:
       context: ../apps/web
       args:
-        NEXT_PUBLIC_API_URL: ""
+        # 公网经 Caddy 443 反代到 /zmt/ 前缀：页面走 basePath，API 走 /zmt/api/*
+        NEXT_BASE_PATH: "/zmt"
+        NEXT_PUBLIC_API_URL: "/zmt"
         BACKEND_URL: "http://127.0.0.1:8090"
     network_mode: host
     container_name: zmt-web

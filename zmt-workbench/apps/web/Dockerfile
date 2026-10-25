@@ -9,9 +9,12 @@ WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 ARG NEXT_PUBLIC_API_URL=http://localhost:8000
+# 公网子路径部署（Caddy /zmt 前缀）；为空时站点挂在根路径
+ARG NEXT_BASE_PATH=
 # rewrites 在构建期固化，容器内用服务名指向 api
 ARG BACKEND_URL=http://localhost:8000
 ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL \
+    NEXT_BASE_PATH=$NEXT_BASE_PATH \
     BACKEND_URL=$BACKEND_URL \
     NEXT_TELEMETRY_DISABLED=1
 RUN npm run build
