@@ -38,7 +38,9 @@ class Storage:
     def build_key(lifecycle: str, project_id: int, filename: str) -> str:
         if lifecycle not in PREFIXES:
             raise ValueError(f"非法生命周期前缀：{lifecycle}")
-        return f"{lifecycle}/{project_id}/{filename}"
+        # 只取文件名，挡掉 ../ 之类的路径穿越（上传文件名来自客户端）
+        name = os.path.basename(str(filename).replace("\\", "/")) or "unnamed"
+        return f"{lifecycle}/{project_id}/{name}"
 
     @staticmethod
     def local_path(key: str) -> str:

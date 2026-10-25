@@ -22,13 +22,17 @@ from app.core.config import settings
 
 app = FastAPI(title=settings.app_name)
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# 仅放行显式配置的来源：`*` 与 credentials 组合在浏览器里本就无效，且等于对全网开放
+cors_origins = [origin.strip() for origin in settings.cors_origins.split(",") if origin.strip()]
+if cors_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=cors_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+        max_age=600,
+    )
 
 
 @app.get("/health", tags=["health"])

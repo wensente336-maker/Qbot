@@ -142,3 +142,35 @@ async def test_video_pipeline(client: AsyncClient, auth_headers: dict[str, str])
     # 4 项真实检测均已执行（合成片为静音+黑底，故只校验结构与检测明细，不假设全通过）
     assert set(qa["checks"]) == {"silence", "black", "subtitle", "av_sync"}
     assert "details" in qa
+
+
+async def test_upload_streaming_and_size_limit(
+    client: AsyncClient,
+    auth_headers: dict[str, str],
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "local_media_dir", str(tmp_path))
+    monkeypatch.setattr(settings, "max_upload_mb", 1)
+
+    r = await client.post(
+        "/api/v1/uploads",
+        files={"file": ("ok.mp4", b"x" * 2048, "video/mp4")},
+        data={"lifecycle": "user-uploads", "project_id": "0"},
+        headers=auth_headers,
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["size_bytes"] == 2048
+    assert (tmp_path / r.json()["key"]).is_file()
+
+    r = await client.post(
+        "/api/v1/uploads",
+        files={"file": ("big.mp4", b"x" * (1024 * 1024 + 1), "video/mp4")},
+        data={"lifecycle": "user-uploads", "project_id": "0"},
+        headers=auth_headers,
+    )
+    assert r.status_code == 413, r.text
+    # 超限的半成品不能留在磁盘上
+    assert not list(tmp_path.rglob("*.part"))

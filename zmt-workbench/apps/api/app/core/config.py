@@ -81,6 +81,13 @@ class Settings(BaseSettings):
     # 本地媒体目录（无 COS 时的兜底存储根目录）
     local_media_dir: str = "media"
 
+    # 上传限制：单文件大小上限（MB），流式落盘，超出直接 413
+    max_upload_mb: int = 2048
+
+    # CORS：逗号分隔的允许来源。同源部署（前端经 /zmt 反代）无需跨域，留空即关闭；
+    # 本地开发默认放行 Next dev server。
+    cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
+
 
 @lru_cache
 def get_settings() -> Settings:

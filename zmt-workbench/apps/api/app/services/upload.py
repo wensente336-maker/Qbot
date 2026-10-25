@@ -9,24 +9,44 @@ from app.core.config import settings
 from app.core.storage import storage
 from app.models.system import AssetFile
 
+# 分块读写，避免整段读入内存；3.6G 小机器上大文件全量 read 会直接 OOM
+CHUNK_SIZE = 1024 * 1024
+
 
 async def save_upload(
     db: AsyncSession, file: UploadFile, lifecycle: str = "user-uploads", project_id: int = 0
 ) -> AssetFile:
-    """将上传文件写入本地磁盘（无 COS 时），并登记 AssetFile。"""
+    """将上传文件流式写入本地磁盘（无 COS 时），并登记 AssetFile。"""
     key = storage.build_key(lifecycle, project_id, file.filename or f"upload-{os.urandom(4).hex()}")
     dest = os.path.join(settings.local_media_dir, key)
     os.makedirs(os.path.dirname(dest), exist_ok=True)
 
-    content = await file.read()
-    with open(dest, "wb") as fh:
-        fh.write(content)
+    limit = settings.max_upload_mb * 1024 * 1024
+    part = f"{dest}.part"
+    size = 0
+    try:
+        with open(part, "wb") as fh:
+            while chunk := await file.read(CHUNK_SIZE):
+                size += len(chunk)
+                if size > limit:
+                    raise HTTPException(
+                        status.HTTP_413_CONTENT_TOO_LARGE,
+                        f"文件超过 {settings.max_upload_mb} MB 上限",
+                    )
+                fh.write(chunk)
+        if size == 0:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "上传文件为空")
+        os.replace(part, dest)
+    finally:
+        # 中途失败/超限时清掉半成品，避免脏文件堆积
+        if os.path.exists(part):
+            os.remove(part)
 
     asset = AssetFile(
         bucket="local",
         key=key,
         url=f"/media/{key}",
-        size_bytes=len(content),
+        size_bytes=size,
         content_type=file.content_type or "application/octet-stream",
         lifecycle=lifecycle,
         status="uploaded",
